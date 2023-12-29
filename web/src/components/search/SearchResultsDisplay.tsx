@@ -1,65 +1,102 @@
+"use client";
+
 import React from "react";
-import { getSourceIcon } from "../source";
-import { LoadingAnimation } from "../Loading";
-import { InfoIcon } from "../icons/icons";
 import {
   DanswerDocument,
   SearchResponse,
   Quote,
   FlowType,
   SearchDefaultOverrides,
+  ValidQuestionResponse,
 } from "@/lib/search/interfaces";
+import { QAFeedbackBlock } from "./QAFeedback";
+import { DocumentDisplay } from "./DocumentDisplay";
+import { ResponseSection, StatusOptions } from "./results/ResponseSection";
+import { QuotesSection } from "./results/QuotesSection";
+import { AnswerSection } from "./results/AnswerSection";
+import { ThreeDots } from "react-loader-spinner";
+import { usePopup } from "../admin/connectors/Popup";
+import { AlertIcon } from "../icons/icons";
+import { removeDuplicateDocs } from "@/lib/documentUtils";
 
-const removeDuplicateDocs = (documents: DanswerDocument[]) => {
-  const seen = new Set<string>();
-  const output: DanswerDocument[] = [];
-  documents.forEach((document) => {
-    if (
-      document.semantic_identifier &&
-      !seen.has(document.semantic_identifier)
-    ) {
-      output.push(document);
-      seen.add(document.semantic_identifier);
-    }
+const getSelectedDocumentIds = (
+  documents: DanswerDocument[],
+  selectedIndices: number[]
+) => {
+  const selectedDocumentIds = new Set<string>();
+  selectedIndices.forEach((ind) => {
+    selectedDocumentIds.add(documents[ind].document_id);
   });
-  return output;
+  return selectedDocumentIds;
 };
 
-interface SearchResultsDisplayProps {
-  searchResponse: SearchResponse | null;
-  isFetching: boolean;
-  defaultOverrides: SearchDefaultOverrides;
-}
-
-export const SearchResultsDisplay: React.FC<SearchResultsDisplayProps> = ({
+export const SearchResultsDisplay = ({
   searchResponse,
+  validQuestionResponse,
   isFetching,
   defaultOverrides,
+  personaName = null,
+}: {
+  searchResponse: SearchResponse | null;
+  validQuestionResponse: ValidQuestionResponse;
+  isFetching: boolean;
+  defaultOverrides: SearchDefaultOverrides;
+  personaName?: string | null;
 }) => {
+  const { popup, setPopup } = usePopup();
+
   if (!searchResponse) {
     return null;
   }
 
-  const { answer, quotes, documents } = searchResponse;
+  const isPersona = personaName !== null;
+  const { answer, quotes, documents, error, queryEventId } = searchResponse;
 
-  if (isFetching && !answer) {
+  if (isFetching && !answer && !documents) {
     return (
       <div className="flex">
         <div className="mx-auto">
-          <LoadingAnimation />
+          <ThreeDots
+            height="30"
+            width="40"
+            color="#3b82f6"
+            ariaLabel="grid-loading"
+            radius="12.5"
+            wrapperStyle={{}}
+            wrapperClass=""
+            visible={true}
+          />
         </div>
       </div>
     );
   }
 
-  if (answer === null && documents === null && quotes === null) {
-    return <div className="text-gray-300">No matching documents found.</div>;
+  if (
+    answer === null &&
+    (documents === null || documents.length === 0) &&
+    quotes === null &&
+    !isFetching
+  ) {
+    return (
+      <div className="mt-4">
+        {error ? (
+          <div className="text-error text-sm">
+            <div className="flex">
+              <AlertIcon size={16} className="text-error my-auto mr-1" />
+              <p className="italic">{error}</p>
+            </div>
+          </div>
+        ) : (
+          <div className="text-subtle">No matching documents found.</div>
+        )}
+      </div>
+    );
   }
 
   const dedupedQuotes: Quote[] = [];
   const seen = new Set<string>();
   if (quotes) {
-    Object.values(quotes).forEach((quote) => {
+    quotes.forEach((quote) => {
       if (!seen.has(quote.document_id)) {
         dedupedQuotes.push(quote);
         seen.add(quote.document_id);
@@ -67,99 +104,76 @@ export const SearchResultsDisplay: React.FC<SearchResultsDisplayProps> = ({
     });
   }
 
+  const selectedDocumentIds = getSelectedDocumentIds(
+    documents || [],
+    searchResponse.selectedDocIndices || []
+  );
+
+  const shouldDisplayQA =
+    searchResponse.suggestedFlowType === FlowType.QUESTION_ANSWER ||
+    defaultOverrides.forceDisplayQA;
+
   return (
     <>
-      {answer &&
-        (searchResponse.suggestedFlowType !== FlowType.SEARCH ||
-          defaultOverrides.forceDisplayQA) && (
-          <div className="min-h-[14rem]">
-            <div className="p-4 border-2 rounded-md border-gray-700">
-              <div className="flex mb-1">
-                <h2 className="text font-bold my-auto">AI Answer</h2>
-              </div>
-              <p className="mb-4">{answer}</p>
-
-              {quotes !== null && (
-                <>
-                  <h2 className="text-sm font-bold mb-2">Sources</h2>
-                  {isFetching && dedupedQuotes.length === 0 ? (
-                    <LoadingAnimation text="Finding quotes" size="text-sm" />
-                  ) : (
-                    <div className="flex">
-                      {dedupedQuotes.length > 0 ? (
-                        dedupedQuotes.map((quoteInfo) => (
-                          <a
-                            key={quoteInfo.document_id}
-                            className="p-2 ml-1 border border-gray-800 rounded-lg text-sm flex max-w-[280px] hover:bg-gray-800"
-                            href={quoteInfo.link}
-                            target="_blank"
-                            rel="noopener noreferrer"
-                          >
-                            {getSourceIcon(quoteInfo.source_type, "20")}
-                            <p className="truncate break-all ml-2">
-                              {quoteInfo.semantic_identifier ||
-                                quoteInfo.document_id}
-                            </p>
-                          </a>
-                        ))
-                      ) : (
-                        <div className="flex">
-                          <InfoIcon
-                            size="20"
-                            className="text-red-500 my-auto flex flex-shrink-0"
-                          />
-                          <div className="text-red-500 text-sm my-auto ml-1">
-                            Did not find any exact quotes to support the above
-                            answer.
-                          </div>
-                        </div>
-                      )}
-                    </div>
-                  )}
-                </>
-              )}
+      {popup}
+      {shouldDisplayQA && (
+        <div className="min-h-[16rem] p-4 border-2 border-border rounded-lg relative">
+          <div>
+            <div className="flex mb-1">
+              <h2 className="text-emphasis font-bold my-auto mb-1 w-full">
+                AI Answer
+              </h2>
             </div>
-          </div>
-        )}
 
-      {(answer === null || answer === undefined) && !isFetching && (
-        <div className="flex">
-          <InfoIcon
-            size="20"
-            className="text-red-500 my-auto flex flex-shrink-0"
-          />
-          <div className="text-red-500 text-xs my-auto ml-1">
-            GPT hurt itself in its confusion :(
+            <div className="mb-2 pt-1 border-t border-border w-full">
+              <AnswerSection
+                answer={answer}
+                quotes={quotes}
+                error={error}
+                nonAnswerableReason={
+                  validQuestionResponse.answerable === false && !isPersona
+                    ? validQuestionResponse.reasoning
+                    : ""
+                }
+                isFetching={isFetching}
+              />
+            </div>
+
+            {quotes !== null && answer && !isPersona && (
+              <div className="pt-1 border-t border-border w-full">
+                <QuotesSection
+                  quotes={dedupedQuotes}
+                  isFetching={isFetching}
+                  isAnswerable={validQuestionResponse.answerable}
+                />
+
+                {searchResponse.queryEventId !== null && (
+                  <div className="absolute right-3 bottom-3">
+                    <QAFeedbackBlock
+                      queryId={searchResponse.queryEventId}
+                      setPopup={setPopup}
+                    />
+                  </div>
+                )}
+              </div>
+            )}
           </div>
         </div>
       )}
 
       {documents && documents.length > 0 && (
         <div className="mt-4">
-          <div className="font-bold border-b mb-4 pb-1 border-gray-800">
+          <div className="font-bold text-emphasis border-b mb-3 pb-1 border-border text-lg">
             Results
           </div>
-          {removeDuplicateDocs(documents).map((doc) => (
-            <div
-              key={doc.semantic_identifier}
-              className="text-sm border-b border-gray-800 mb-3"
-            >
-              <a
-                className={
-                  "rounded-lg flex font-bold " +
-                  (doc.link ? "" : "pointer-events-none")
-                }
-                href={doc.link}
-                target="_blank"
-                rel="noopener noreferrer"
-              >
-                {getSourceIcon(doc.source_type, "20")}
-                <p className="truncate break-all ml-2">
-                  {doc.semantic_identifier || doc.document_id}
-                </p>
-              </a>
-              <p className="pl-1 py-3 text-gray-200">{doc.blurb}</p>
-            </div>
+          {removeDuplicateDocs(documents).map((document) => (
+            <DocumentDisplay
+              key={document.document_id}
+              document={document}
+              queryEventId={queryEventId}
+              isSelected={selectedDocumentIds.has(document.document_id)}
+              setPopup={setPopup}
+            />
           ))}
         </div>
       )}

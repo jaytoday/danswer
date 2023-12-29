@@ -3,20 +3,15 @@ import { Formik, Form } from "formik";
 import * as Yup from "yup";
 import { Popup } from "./Popup";
 import { CredentialBase } from "@/lib/types";
+import { createCredential } from "@/lib/credential";
+import { Button } from "@tremor/react";
 
 export async function submitCredential<T>(
-  connector: CredentialBase<T>
+  credential: CredentialBase<T>
 ): Promise<{ message: string; isSuccess: boolean }> {
   let isSuccess = false;
   try {
-    const response = await fetch(`/api/manage/credential`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify(connector),
-    });
-
+    const response = await createCredential(credential);
     if (response.ok) {
       isSuccess = true;
       return { message: "Success!", isSuccess: true };
@@ -57,7 +52,7 @@ export function CredentialForm<T extends Yup.AnyObject>({
           formikHelpers.setSubmitting(true);
           submitCredential<T>({
             credential_json: values,
-            public_doc: true,
+            admin_public: true,
           }).then(({ message, isSuccess }) => {
             setPopup({ message, type: isSuccess ? "success" : "error" });
             formikHelpers.setSubmitting(false);
@@ -72,17 +67,15 @@ export function CredentialForm<T extends Yup.AnyObject>({
           <Form>
             {formBody}
             <div className="flex">
-              <button
+              <Button
                 type="submit"
+                size="xs"
+                color="green"
                 disabled={isSubmitting}
-                className={
-                  "bg-slate-500 hover:bg-slate-700 text-white " +
-                  "font-bold py-2 px-4 rounded focus:outline-none " +
-                  "focus:shadow-outline w-full max-w-sm mx-auto"
-                }
+                className="mx-auto w-64"
               >
                 Update
-              </button>
+              </Button>
             </div>
           </Form>
         )}

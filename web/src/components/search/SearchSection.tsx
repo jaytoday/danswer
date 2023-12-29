@@ -3,40 +3,50 @@
 import { useRef, useState } from "react";
 import { SearchBar } from "./SearchBar";
 import { SearchResultsDisplay } from "./SearchResultsDisplay";
-import { SourceSelector } from "./Filters";
-import { Connector } from "@/lib/types";
-import { SearchTypeSelector } from "./SearchTypeSelector";
+import { SourceSelector } from "./filtering/Filters";
+import { Connector, DocumentSet } from "@/lib/types";
 import {
   DanswerDocument,
   Quote,
   SearchResponse,
-  Source,
   FlowType,
   SearchType,
   SearchDefaultOverrides,
   SearchRequestOverrides,
+  ValidQuestionResponse,
 } from "@/lib/search/interfaces";
 import { searchRequestStreamed } from "@/lib/search/streamingQa";
-import Cookies from "js-cookie";
 import { SearchHelper } from "./SearchHelper";
 import { CancellationToken, cancellable } from "@/lib/search/cancellable";
-import { NEXT_PUBLIC_DISABLE_STREAMING } from "@/lib/constants";
-import { searchRequest } from "@/lib/search/qa";
+import { useFilters, useObjectState } from "@/lib/hooks";
+import { questionValidationStreamed } from "@/lib/search/streamingQuestionValidation";
+import { Persona } from "@/app/admin/personas/interfaces";
+import { PersonaSelector } from "./PersonaSelector";
 
 const SEARCH_DEFAULT_OVERRIDES_START: SearchDefaultOverrides = {
   forceDisplayQA: false,
   offset: 0,
 };
 
+const VALID_QUESTION_RESPONSE_DEFAULT: ValidQuestionResponse = {
+  reasoning: null,
+  answerable: null,
+  error: null,
+};
+
 interface SearchSectionProps {
   connectors: Connector<any>[];
+  documentSets: DocumentSet[];
+  personas: Persona[];
   defaultSearchType: SearchType;
 }
 
-export const SearchSection: React.FC<SearchSectionProps> = ({
+export const SearchSection = ({
   connectors,
+  documentSets,
+  personas,
   defaultSearchType,
-}) => {
+}: SearchSectionProps) => {
   // Search Bar
   const [query, setQuery] = useState<string>("");
 
@@ -46,12 +56,19 @@ export const SearchSection: React.FC<SearchSectionProps> = ({
   );
   const [isFetching, setIsFetching] = useState(false);
 
+  const [validQuestionResponse, setValidQuestionResponse] =
+    useObjectState<ValidQuestionResponse>(VALID_QUESTION_RESPONSE_DEFAULT);
+
   // Filters
-  const [sources, setSources] = useState<Source[]>([]);
+  const filterManager = useFilters();
 
   // Search Type
   const [selectedSearchType, setSelectedSearchType] =
     useState<SearchType>(defaultSearchType);
+
+  const [selectedPersona, setSelectedPersona] = useState<number>(
+    personas[0]?.id || 0
+  );
 
   // Overrides for default behavior that only last a single query
   const [defaultOverrides, setDefaultOverrides] =
@@ -64,13 +81,16 @@ export const SearchSection: React.FC<SearchSectionProps> = ({
     documents: null,
     suggestedSearchType: null,
     suggestedFlowType: null,
+    selectedDocIndices: null,
+    error: null,
+    queryEventId: null,
   };
   const updateCurrentAnswer = (answer: string) =>
     setSearchResponse((prevState) => ({
       ...(prevState || initialSearchResponse),
       answer,
     }));
-  const updateQuotes = (quotes: Record<string, Quote>) =>
+  const updateQuotes = (quotes: Quote[]) =>
     setSearchResponse((prevState) => ({
       ...(prevState || initialSearchResponse),
       quotes,
@@ -90,6 +110,21 @@ export const SearchSection: React.FC<SearchSectionProps> = ({
       ...(prevState || initialSearchResponse),
       suggestedFlowType,
     }));
+  const updateSelectedDocIndices = (docIndices: number[]) =>
+    setSearchResponse((prevState) => ({
+      ...(prevState || initialSearchResponse),
+      selectedDocIndices: docIndices,
+    }));
+  const updateError = (error: FlowType) =>
+    setSearchResponse((prevState) => ({
+      ...(prevState || initialSearchResponse),
+      error,
+    }));
+  const updateQueryEventId = (queryEventId: number) =>
+    setSearchResponse((prevState) => ({
+      ...(prevState || initialSearchResponse),
+      queryEventId,
+    }));
 
   let lastSearchCancellationToken = useRef<CancellationToken | null>(null);
   const onSearch = async ({
@@ -104,13 +139,16 @@ export const SearchSection: React.FC<SearchSectionProps> = ({
 
     setIsFetching(true);
     setSearchResponse(initialSearchResponse);
+    setValidQuestionResponse(VALID_QUESTION_RESPONSE_DEFAULT);
 
-    const searchFn = NEXT_PUBLIC_DISABLE_STREAMING
-      ? searchRequest
-      : searchRequestStreamed;
-    await searchFn({
+    const searchFnArgs = {
       query,
-      sources,
+      sources: filterManager.selectedSources,
+      documentSets: filterManager.selectedDocumentSets,
+      timeRange: filterManager.timeRange,
+      persona: personas.find(
+        (persona) => persona.id === selectedPersona
+      ) as Persona,
       updateCurrentAnswer: cancellable({
         cancellationToken: lastSearchCancellationToken.current,
         fn: updateCurrentAnswer,
@@ -131,25 +169,47 @@ export const SearchSection: React.FC<SearchSectionProps> = ({
         cancellationToken: lastSearchCancellationToken.current,
         fn: updateSuggestedFlowType,
       }),
+      updateSelectedDocIndices: cancellable({
+        cancellationToken: lastSearchCancellationToken.current,
+        fn: updateSelectedDocIndices,
+      }),
+      updateError: cancellable({
+        cancellationToken: lastSearchCancellationToken.current,
+        fn: updateError,
+      }),
+      updateQueryEventId: cancellable({
+        cancellationToken: lastSearchCancellationToken.current,
+        fn: updateQueryEventId,
+      }),
       selectedSearchType: searchType ?? selectedSearchType,
       offset: offset ?? defaultOverrides.offset,
-    });
+    };
+
+    const questionValidationArgs = {
+      query,
+      update: setValidQuestionResponse,
+    };
+
+    await Promise.all([
+      searchRequestStreamed(searchFnArgs),
+      questionValidationStreamed(questionValidationArgs),
+    ]);
 
     setIsFetching(false);
   };
 
   return (
-    <div className="relative max-w-[2000px] xl:max-w-[1400px] mx-auto">
+    <div className="relative max-w-[2000px] xl:max-w-[1430px] mx-auto">
       <div className="absolute left-0 hidden 2xl:block w-64">
-        {connectors.length > 0 && (
+        {(connectors.length > 0 || documentSets.length > 0) && (
           <SourceSelector
-            selectedSources={sources}
-            setSelectedSources={setSources}
+            {...filterManager}
+            availableDocumentSets={documentSets}
             existingSources={connectors.map((connector) => connector.source)}
           />
         )}
 
-        <div className="mt-10">
+        <div className="mt-10 pr-5">
           <SearchHelper
             isFetching={isFetching}
             searchResponse={searchResponse}
@@ -173,13 +233,17 @@ export const SearchSection: React.FC<SearchSectionProps> = ({
         </div>
       </div>
       <div className="w-[800px] mx-auto">
-        <SearchTypeSelector
-          selectedSearchType={selectedSearchType}
-          setSelectedSearchType={(searchType) => {
-            Cookies.set("searchType", searchType);
-            setSelectedSearchType(searchType);
-          }}
-        />
+        {personas.length > 0 ? (
+          <div className="flex mb-2 w-fit">
+            <PersonaSelector
+              personas={personas}
+              selectedPersonaId={selectedPersona}
+              onPersonaChange={(persona) => setSelectedPersona(persona.id)}
+            />
+          </div>
+        ) : (
+          <div className="pt-3" />
+        )}
 
         <SearchBar
           query={query}
@@ -193,8 +257,14 @@ export const SearchSection: React.FC<SearchSectionProps> = ({
         <div className="mt-2">
           <SearchResultsDisplay
             searchResponse={searchResponse}
+            validQuestionResponse={validQuestionResponse}
             isFetching={isFetching}
             defaultOverrides={defaultOverrides}
+            personaName={
+              selectedPersona
+                ? personas.find((p) => p.id === selectedPersona)?.name
+                : null
+            }
           />
         </div>
       </div>

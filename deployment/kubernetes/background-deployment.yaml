@@ -14,20 +14,14 @@ spec:
     spec:
       containers:
       - name: background
-        image: danswer/danswer-background:latest
+        image: danswer/danswer-backend:latest
         imagePullPolicy: IfNotPresent
-        env:
-        - name: POSTGRES_HOST
-          value: relational-db-service
-        - name: QDRANT_HOST
-          value: vector-db-service
-        - name: TYPESENSE_HOST
-          value: search-engine-service
-        - name: TYPESENSE_API_KEY
-          valueFrom:
-            secretKeyRef:
-              name: danswer-secrets
-              key: typesense_api_key
+        command: ["/usr/bin/supervisord"]
+        # There are some extra values since this is shared between services
+        # There are no conflicts though, extra env variables are simply ignored
+        envFrom:
+        - configMapRef:
+            name: env-configmap
         volumeMounts:
         - name: dynamic-storage
           mountPath: /home/storage

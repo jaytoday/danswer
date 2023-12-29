@@ -1,132 +1,200 @@
 import os
 
+from danswer.configs.constants import AuthType
+from danswer.configs.constants import DocumentIndexType
+
+
 #####
 # App Configs
 #####
 APP_HOST = "0.0.0.0"
 APP_PORT = 8080
+# API_PREFIX is used to prepend a base path for all API routes
+# generally used if using a reverse proxy which doesn't support stripping the `/api`
+# prefix from requests directed towards the API server. In these cases, set this to `/api`
+APP_API_PREFIX = os.environ.get("API_PREFIX", "")
 
 
 #####
 # User Facing Features Configs
 #####
-BLURB_LENGTH = 200  # Characters. Blurbs will be truncated at the first punctuation after this many characters.
+BLURB_SIZE = 128  # Number Encoder Tokens included in the chunk blurb
 GENERATIVE_MODEL_ACCESS_CHECK_FREQ = 86400  # 1 day
+# CURRENTLY DOES NOT FULLY WORK, DON'T USE THIS
+DISABLE_GENERATIVE_AI = os.environ.get("DISABLE_GENERATIVE_AI", "").lower() == "true"
+
 
 #####
 # Web Configs
 #####
-# WEB_DOMAIN is used to set the redirect_uri when doing OAuth with Google
-# TODO: investigate if this can be done cleaner by overwriting the redirect_uri
-# on the frontend and just sending a dummy value (or completely generating the URL)
-# on the frontend
-WEB_DOMAIN = os.environ.get("WEB_DOMAIN", "http://localhost:3000")
+# WEB_DOMAIN is used to set the redirect_uri after login flows
+WEB_DOMAIN = os.environ.get("WEB_DOMAIN") or "http://localhost:3000"
 
 
 #####
 # Auth Configs
 #####
-DISABLE_AUTH = os.environ.get("DISABLE_AUTH", "").lower() == "true"
-REQUIRE_EMAIL_VERIFICATION = (
-    os.environ.get("REQUIRE_EMAIL_VERIFICATION", "").lower() == "true"
-)
-SMTP_SERVER = os.environ.get("SMTP_SERVER", "smtp.gmail.com")
-SMTP_PORT = int(os.environ.get("SMTP_PORT", "587"))
-SMTP_USER = os.environ.get("SMTP_USER", "your-email@gmail.com")
-SMTP_PASS = os.environ.get("SMTP_PASS", "your-gmail-password")
+AUTH_TYPE = AuthType((os.environ.get("AUTH_TYPE") or AuthType.DISABLED.value).lower())
+DISABLE_AUTH = AUTH_TYPE == AuthType.DISABLED
 
-SECRET = os.environ.get("SECRET", "")
-SESSION_EXPIRE_TIME_SECONDS = int(
-    os.environ.get("SESSION_EXPIRE_TIME_SECONDS", 86400)
-)  # 1 day
-VALID_EMAIL_DOMAIN = os.environ.get("VALID_EMAIL_DOMAIN", "")
-# OAuth Login Flow
-ENABLE_OAUTH = os.environ.get("ENABLE_OAUTH", "").lower() != "false"
-GOOGLE_OAUTH_CLIENT_ID = os.environ.get("GOOGLE_OAUTH_CLIENT_ID", "")
-GOOGLE_OAUTH_CLIENT_SECRET = os.environ.get("GOOGLE_OAUTH_CLIENT_SECRET", "")
+# Turn off mask if admin users should see full credentials for data connectors.
 MASK_CREDENTIAL_PREFIX = (
     os.environ.get("MASK_CREDENTIAL_PREFIX", "True").lower() != "false"
 )
+
+SECRET = os.environ.get("SECRET", "")
+SESSION_EXPIRE_TIME_SECONDS = int(
+    os.environ.get("SESSION_EXPIRE_TIME_SECONDS") or 86400
+)  # 1 day
+
+# set `VALID_EMAIL_DOMAINS` to a comma seperated list of domains in order to
+# restrict access to Danswer to only users with emails from those domains.
+# E.g. `VALID_EMAIL_DOMAINS=example.com,example.org` will restrict Danswer
+# signups to users with either an @example.com or an @example.org email.
+# NOTE: maintaining `VALID_EMAIL_DOMAIN` to keep backwards compatibility
+_VALID_EMAIL_DOMAIN = os.environ.get("VALID_EMAIL_DOMAIN", "")
+_VALID_EMAIL_DOMAINS_STR = (
+    os.environ.get("VALID_EMAIL_DOMAINS", "") or _VALID_EMAIL_DOMAIN
+)
+VALID_EMAIL_DOMAINS = (
+    [domain.strip() for domain in _VALID_EMAIL_DOMAINS_STR.split(",")]
+    if _VALID_EMAIL_DOMAINS_STR
+    else []
+)
+# OAuth Login Flow
+# Used for both Google OAuth2 and OIDC flows
+OAUTH_CLIENT_ID = (
+    os.environ.get("OAUTH_CLIENT_ID", os.environ.get("GOOGLE_OAUTH_CLIENT_ID")) or ""
+)
+OAUTH_CLIENT_SECRET = (
+    os.environ.get("OAUTH_CLIENT_SECRET", os.environ.get("GOOGLE_OAUTH_CLIENT_SECRET"))
+    or ""
+)
+
+# for basic auth
+REQUIRE_EMAIL_VERIFICATION = (
+    os.environ.get("REQUIRE_EMAIL_VERIFICATION", "").lower() == "true"
+)
+SMTP_SERVER = os.environ.get("SMTP_SERVER") or "smtp.gmail.com"
+SMTP_PORT = int(os.environ.get("SMTP_PORT") or "587")
+SMTP_USER = os.environ.get("SMTP_USER", "your-email@gmail.com")
+SMTP_PASS = os.environ.get("SMTP_PASS", "your-gmail-password")
 
 
 #####
 # DB Configs
 #####
-# Qdrant is Semantic Search Vector DB
-# Url / Key are used to connect to a remote Qdrant instance
-QDRANT_URL = os.environ.get("QDRANT_URL", "")
-QDRANT_API_KEY = os.environ.get("QDRANT_API_KEY", "")
-# Host / Port are used for connecting to local Qdrant instance
-QDRANT_HOST = os.environ.get("QDRANT_HOST", "localhost")
-QDRANT_PORT = 6333
-QDRANT_DEFAULT_COLLECTION = os.environ.get("QDRANT_DEFAULT_COLLECTION", "danswer_index")
-# Typesense is the Keyword Search Engine
-TYPESENSE_HOST = os.environ.get("TYPESENSE_HOST", "localhost")
-TYPESENSE_PORT = 8108
-TYPESENSE_DEFAULT_COLLECTION = os.environ.get(
-    "TYPESENSE_DEFAULT_COLLECTION", "danswer_index"
+DOCUMENT_INDEX_NAME = "danswer_index"
+# Vespa is now the default document index store for both keyword and vector
+DOCUMENT_INDEX_TYPE = os.environ.get(
+    "DOCUMENT_INDEX_TYPE", DocumentIndexType.COMBINED.value
 )
-TYPESENSE_API_KEY = os.environ.get("TYPESENSE_API_KEY", "")
+VESPA_HOST = os.environ.get("VESPA_HOST") or "localhost"
+VESPA_PORT = os.environ.get("VESPA_PORT") or "8081"
+VESPA_TENANT_PORT = os.environ.get("VESPA_TENANT_PORT") or "19071"
+# The default below is for dockerized deployment
+VESPA_DEPLOYMENT_ZIP = (
+    os.environ.get("VESPA_DEPLOYMENT_ZIP") or "/app/danswer/vespa-app.zip"
+)
 # Number of documents in a batch during indexing (further batching done by chunks before passing to bi-encoder)
-INDEX_BATCH_SIZE = 16
+try:
+    INDEX_BATCH_SIZE = int(os.environ.get("INDEX_BATCH_SIZE", 16))
+except ValueError:
+    INDEX_BATCH_SIZE = 16
 
-# below are intended to match the env variables names used by the official postgres docker image
+# Below are intended to match the env variables names used by the official postgres docker image
 # https://hub.docker.com/_/postgres
-POSTGRES_USER = os.environ.get("POSTGRES_USER", "postgres")
-POSTGRES_PASSWORD = os.environ.get("POSTGRES_PASSWORD", "password")
-POSTGRES_HOST = os.environ.get("POSTGRES_HOST", "localhost")
-POSTGRES_PORT = os.environ.get("POSTGRES_PORT", "5432")
-POSTGRES_DB = os.environ.get("POSTGRES_DB", "postgres")
+POSTGRES_USER = os.environ.get("POSTGRES_USER") or "postgres"
+POSTGRES_PASSWORD = os.environ.get("POSTGRES_PASSWORD") or "password"
+POSTGRES_HOST = os.environ.get("POSTGRES_HOST") or "localhost"
+POSTGRES_PORT = os.environ.get("POSTGRES_PORT") or "5432"
+POSTGRES_DB = os.environ.get("POSTGRES_DB") or "postgres"
 
 
 #####
 # Connector Configs
 #####
 GOOGLE_DRIVE_INCLUDE_SHARED = False
+GOOGLE_DRIVE_FOLLOW_SHORTCUTS = False
+
 FILE_CONNECTOR_TMP_STORAGE_PATH = os.environ.get(
     "FILE_CONNECTOR_TMP_STORAGE_PATH", "/home/file_connector_storage"
 )
 
-#####
-# Query Configs
-#####
-NUM_RETURNED_HITS = 50
-NUM_RERANKED_RESULTS = 15
-NUM_GENERATIVE_AI_INPUT_DOCS = 5
-# 1 edit per 2 characters, currently unused due to fuzzy match being too slow
-QUOTE_ALLOWED_ERROR_PERCENT = 0.05
-QA_TIMEOUT = 10  # 10 seconds
+# TODO these should be available for frontend configuration, via advanced options expandable
+WEB_CONNECTOR_IGNORED_CLASSES = os.environ.get(
+    "WEB_CONNECTOR_IGNORED_CLASSES", "sidebar,footer"
+).split(",")
+WEB_CONNECTOR_IGNORED_ELEMENTS = os.environ.get(
+    "WEB_CONNECTOR_IGNORED_ELEMENTS", "nav,footer,meta,script,style,symbol,aside"
+).split(",")
+WEB_CONNECTOR_OAUTH_CLIENT_ID = os.environ.get("WEB_CONNECTOR_OAUTH_CLIENT_ID")
+WEB_CONNECTOR_OAUTH_CLIENT_SECRET = os.environ.get("WEB_CONNECTOR_OAUTH_CLIENT_SECRET")
+WEB_CONNECTOR_OAUTH_TOKEN_URL = os.environ.get("WEB_CONNECTOR_OAUTH_TOKEN_URL")
+
+NOTION_CONNECTOR_ENABLE_RECURSIVE_PAGE_LOOKUP = (
+    os.environ.get("NOTION_CONNECTOR_ENABLE_RECURSIVE_PAGE_LOOKUP", "").lower()
+    == "true"
+)
+
+CONFLUENCE_CONNECTOR_LABELS_TO_SKIP = [
+    ignored_tag
+    for ignored_tag in os.environ.get("CONFLUENCE_CONNECTOR_LABELS_TO_SKIP", "").split(
+        ","
+    )
+    if ignored_tag
+]
+
+GONG_CONNECTOR_START_TIME = os.environ.get("GONG_CONNECTOR_START_TIME")
+
+DASK_JOB_CLIENT_ENABLED = (
+    os.environ.get("DASK_JOB_CLIENT_ENABLED", "").lower() == "true"
+)
+EXPERIMENTAL_CHECKPOINTING_ENABLED = (
+    os.environ.get("EXPERIMENTAL_CHECKPOINTING_ENABLED", "").lower() == "true"
+)
 
 
 #####
-# Text Processing Configs
+# Indexing Configs
 #####
-# Chunking docs to this number of characters not including finishing the last word and the overlap words below
-# Calculated by ~500 to 512 tokens max * average 4 chars per token
-CHUNK_SIZE = 2000
+# NOTE: Currently only supported in the Confluence and Google Drive connectors +
+# only handles some failures (Confluence = handles API call failures, Google
+# Drive = handles failures pulling files / parsing them)
+CONTINUE_ON_CONNECTOR_FAILURE = os.environ.get(
+    "CONTINUE_ON_CONNECTOR_FAILURE", ""
+).lower() not in ["false", ""]
+# Controls how many worker processes we spin up to index documents in the
+# background. This is useful for speeding up indexing, but does require a
+# fairly large amount of memory in order to increase substantially, since
+# each worker loads the embedding models into memory.
+NUM_INDEXING_WORKERS = int(os.environ.get("NUM_INDEXING_WORKERS") or 1)
+CHUNK_OVERLAP = 0
 # More accurate results at the expense of indexing speed and index size (stores additional 4 MINI_CHUNK vectors)
-ENABLE_MINI_CHUNK = False
-# Mini chunks for fine-grained embedding, calculated as 128 tokens for 4 additional vectors for 512 chunk size above
-# Not rounded down to not lose any context in full chunk.
-MINI_CHUNK_SIZE = 512
-# Each chunk includes an additional 5 words from previous chunk
-# in extreme cases, may cause some words at the end to be truncated by embedding model
-CHUNK_OVERLAP = 5
+ENABLE_MINI_CHUNK = os.environ.get("ENABLE_MINI_CHUNK", "").lower() == "true"
+# Finer grained chunking for more detail retention
+# Slightly larger since the sentence aware split is a max cutoff so most minichunks will be under MINI_CHUNK_SIZE
+# tokens. But we need it to be at least as big as 1/4th chunk size to avoid having a tiny mini-chunk at the end
+MINI_CHUNK_SIZE = 150
+# Timeout to wait for job's last update before killing it, in hours
+CLEANUP_INDEXING_JOBS_TIMEOUT = int(os.environ.get("CLEANUP_INDEXING_JOBS_TIMEOUT", 1))
 
 
 #####
-# Other API Keys
+# Model Server Configs
 #####
-OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "")
+# If MODEL_SERVER_HOST is set, the NLP models required for Danswer are offloaded to the server via
+# requests. Be sure to include the scheme in the MODEL_SERVER_HOST value.
+MODEL_SERVER_HOST = os.environ.get("MODEL_SERVER_HOST") or None
+MODEL_SERVER_ALLOWED_HOST = os.environ.get("MODEL_SERVER_HOST") or "0.0.0.0"
+MODEL_SERVER_PORT = int(os.environ.get("MODEL_SERVER_PORT") or "9000")
 
-
-#####
-# Encoder Model Endpoint Configs (Currently unused, running the models in memory)
-#####
-BI_ENCODER_HOST = "localhost"
-BI_ENCODER_PORT = 9000
-CROSS_ENCODER_HOST = "localhost"
-CROSS_ENCODER_PORT = 9000
+# specify this env variable directly to have a different model server for the background
+# indexing job vs the api server so that background indexing does not effect query-time
+# performance
+INDEXING_MODEL_SERVER_HOST = (
+    os.environ.get("INDEXING_MODEL_SERVER_HOST") or MODEL_SERVER_HOST
+)
 
 
 #####
@@ -136,12 +204,22 @@ DYNAMIC_CONFIG_STORE = os.environ.get(
     "DYNAMIC_CONFIG_STORE", "FileSystemBackedDynamicConfigStore"
 )
 DYNAMIC_CONFIG_DIR_PATH = os.environ.get("DYNAMIC_CONFIG_DIR_PATH", "/home/storage")
-
-
-#####
-# Danswer Slack Bot Configs
-#####
-DANSWER_BOT_NUM_DOCS_TO_DISPLAY = int(
-    os.environ.get("DANSWER_BOT_NUM_DOCS_TO_DISPLAY", "5")
+JOB_TIMEOUT = 60 * 60 * 6  # 6 hours default
+# used to allow the background indexing jobs to use a different embedding
+# model server than the API server
+CURRENT_PROCESS_IS_AN_INDEXING_JOB = (
+    os.environ.get("CURRENT_PROCESS_IS_AN_INDEXING_JOB", "").lower() == "true"
 )
-DANSWER_BOT_NUM_RETRIES = int(os.environ.get("DANSWER_BOT_NUM_RETRIES", "5"))
+# Logs every model prompt and output, mostly used for development or exploration purposes
+LOG_ALL_MODEL_INTERACTIONS = (
+    os.environ.get("LOG_ALL_MODEL_INTERACTIONS", "").lower() == "true"
+)
+# If set to `true` will enable additional logs about Vespa query performance
+# (time spent on finding the right docs + time spent fetching summaries from disk)
+LOG_VESPA_TIMING_INFORMATION = (
+    os.environ.get("LOG_VESPA_TIMING_INFORMATION", "").lower() == "true"
+)
+# Anonymous usage telemetry
+DISABLE_TELEMETRY = os.environ.get("DISABLE_TELEMETRY", "").lower() == "true"
+# notset, debug, info, warning, error, or critical
+LOG_LEVEL = os.environ.get("LOG_LEVEL", "info")

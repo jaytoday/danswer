@@ -1,19 +1,20 @@
 from typing import cast
 
-from danswer.configs.constants import DocumentSource
-from danswer.connectors.models import InputType
-from danswer.db.models import Connector
-from danswer.db.models import IndexAttempt
-from danswer.server.models import ConnectorBase
-from danswer.server.models import ObjectCreationIdResponse
-from danswer.server.models import StatusResponse
-from danswer.utils.logging import setup_logger
 from fastapi import HTTPException
 from sqlalchemy import and_
 from sqlalchemy import func
 from sqlalchemy import select
 from sqlalchemy.orm import aliased
 from sqlalchemy.orm import Session
+
+from danswer.configs.constants import DocumentSource
+from danswer.connectors.models import InputType
+from danswer.db.models import Connector
+from danswer.db.models import IndexAttempt
+from danswer.server.documents.models import ConnectorBase
+from danswer.server.documents.models import ObjectCreationIdResponse
+from danswer.server.models import StatusResponse
+from danswer.utils.logger import setup_logger
 
 logger = setup_logger()
 
@@ -35,8 +36,12 @@ def fetch_connectors(
     return list(results.all())
 
 
-def connector_by_name_exists(connector_name: str, db_session: Session) -> bool:
-    stmt = select(Connector).where(Connector.name == connector_name)
+def connector_by_name_source_exists(
+    connector_name: str, source: DocumentSource, db_session: Session
+) -> bool:
+    stmt = select(Connector).where(
+        Connector.name == connector_name, Connector.source == source
+    )
     result = db_session.execute(stmt)
     connector = result.scalar_one_or_none()
     return connector is not None
@@ -49,11 +54,26 @@ def fetch_connector_by_id(connector_id: int, db_session: Session) -> Connector |
     return connector
 
 
+def fetch_ingestion_connector_by_name(
+    connector_name: str, db_session: Session
+) -> Connector | None:
+    stmt = (
+        select(Connector)
+        .where(Connector.name == connector_name)
+        .where(Connector.source == DocumentSource.INGESTION_API)
+    )
+    result = db_session.execute(stmt)
+    connector = result.scalar_one_or_none()
+    return connector
+
+
 def create_connector(
     connector_data: ConnectorBase,
     db_session: Session,
 ) -> ObjectCreationIdResponse:
-    if connector_by_name_exists(connector_data.name, db_session):
+    if connector_by_name_source_exists(
+        connector_data.name, connector_data.source, db_session
+    ):
         raise ValueError(
             "Connector by this name already exists, duplicate naming not allowed."
         )
@@ -81,8 +101,8 @@ def update_connector(
     if connector is None:
         return None
 
-    if connector_data.name != connector.name and connector_by_name_exists(
-        connector_data.name, db_session
+    if connector_data.name != connector.name and connector_by_name_source_exists(
+        connector_data.name, connector_data.source, db_session
     ):
         raise ValueError(
             "Connector by this name already exists, duplicate naming not allowed."
@@ -127,7 +147,6 @@ def delete_connector(
         )
 
     db_session.delete(connector)
-    db_session.commit()
     return StatusResponse(
         success=True, message="Connector deleted successfully", data=connector_id
     )
@@ -202,3 +221,44 @@ def fetch_latest_index_attempts_by_status(
         ),
     )
     return cast(list[IndexAttempt], query.all())
+
+
+def fetch_unique_document_sources(db_session: Session) -> list[DocumentSource]:
+    distinct_sources = db_session.query(Connector.source).distinct().all()
+
+    sources = [
+        source[0]
+        for source in distinct_sources
+        if source[0] != DocumentSource.INGESTION_API
+    ]
+
+    return sources
+
+
+def create_initial_default_connector(db_session: Session) -> None:
+    default_connector_id = 0
+    default_connector = fetch_connector_by_id(default_connector_id, db_session)
+
+    if default_connector is not None:
+        if (
+            default_connector.source != DocumentSource.INGESTION_API
+            or default_connector.input_type != InputType.LOAD_STATE
+            or default_connector.refresh_freq is not None
+            or default_connector.disabled
+        ):
+            raise ValueError(
+                "DB is not in a valid initial state. "
+                "Default connector does not have expected values."
+            )
+        return
+
+    connector = Connector(
+        id=default_connector_id,
+        name="Ingestion API",
+        source=DocumentSource.INGESTION_API,
+        input_type=InputType.LOAD_STATE,
+        connector_specific_config={},
+        refresh_freq=None,
+    )
+    db_session.add(connector)
+    db_session.commit()

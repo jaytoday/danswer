@@ -7,7 +7,7 @@ import {
 } from "@/lib/search/interfaces";
 import { BrainIcon } from "../icons/icons";
 
-const CLICKABLE_CLASS_NAME = "text-blue-400 cursor-pointer";
+const CLICKABLE_CLASS_NAME = "text-link cursor-pointer";
 const NUM_DOCUMENTS_FED_TO_GPT = 5;
 
 interface Props {
@@ -38,7 +38,6 @@ const getAssistantMessage = ({
   if (
     searchResponse.suggestedFlowType === FlowType.SEARCH &&
     !defaultOverrides.forceDisplayQA &&
-    !isFetching &&
     searchResponse.answer
   ) {
     return (
@@ -47,44 +46,6 @@ const getAssistantMessage = ({
         want to have{" "}
         <span className={CLICKABLE_CLASS_NAME} onClick={forceQADisplay}>
           GPT give a response?
-        </span>
-      </div>
-    );
-  }
-
-  if (
-    selectedSearchType !== SearchType.AUTOMATIC &&
-    searchResponse.suggestedSearchType !== selectedSearchType
-  ) {
-    if (searchResponse.suggestedSearchType === SearchType.SEMANTIC) {
-      return (
-        <div>
-          Your query looks more like natural language, Semantic Search may yield
-          better results. Would you like to{" "}
-          <span
-            className={CLICKABLE_CLASS_NAME}
-            onClick={() => {
-              setSelectedSearchType(SearchType.SEMANTIC);
-              restartSearch({ searchType: SearchType.SEMANTIC });
-            }}
-          >
-            try AI search?
-          </span>
-        </div>
-      );
-    }
-    return (
-      <div>
-        Your query seems to be a better fit for keyword search. Would you like
-        to{" "}
-        <span
-          className={CLICKABLE_CLASS_NAME}
-          onClick={() => {
-            setSelectedSearchType(SearchType.KEYWORD);
-            restartSearch({ searchType: SearchType.KEYWORD });
-          }}
-        >
-          try Keyword search?
         </span>
       </div>
     );
@@ -128,13 +89,13 @@ export const SearchHelper: React.FC<Props> = (props) => {
   }
 
   return (
-    <div className="border border-gray-800 rounded p-3 text-sm">
+    <div className="border border-border rounded p-3 text-sm">
       <div className="flex">
-        <BrainIcon size="20" />
-        <b className="ml-2">AI Assistant</b>
+        <BrainIcon size={20} />
+        <b className="ml-2 text-strong">AI Assistant</b>
       </div>
 
-      <p className="mt-1 text-gray-300">{message}</p>
+      <p className="mt-1">{message}</p>
     </div>
   );
 };

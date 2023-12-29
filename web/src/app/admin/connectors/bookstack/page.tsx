@@ -8,16 +8,19 @@ import { CredentialForm } from "@/components/admin/connectors/CredentialForm";
 import {
   BookstackCredentialJson,
   BookstackConfig,
-  Credential,
   ConnectorIndexingStatus,
+  Credential,
 } from "@/lib/types";
 import useSWR, { useSWRConfig } from "swr";
 import { fetcher } from "@/lib/fetcher";
 import { LoadingAnimation } from "@/components/Loading";
-import { deleteCredential, linkCredential } from "@/lib/credential";
+import { adminDeleteCredential, linkCredential } from "@/lib/credential";
 import { ConnectorForm } from "@/components/admin/connectors/ConnectorForm";
 import { ConnectorsTable } from "@/components/admin/connectors/table/ConnectorsTable";
 import { usePopup } from "@/components/admin/connectors/Popup";
+import { usePublicCredentials } from "@/lib/hooks";
+import { AdminPageTitle } from "@/components/admin/Title";
+import { Card, Text, Title } from "@tremor/react";
 
 const Main = () => {
   const { popup, setPopup } = usePopup();
@@ -27,7 +30,7 @@ const Main = () => {
     data: connectorIndexingStatuses,
     isLoading: isConnectorIndexingStatusesLoading,
     error: isConnectorIndexingStatusesError,
-  } = useSWR<ConnectorIndexingStatus<any>[]>(
+  } = useSWR<ConnectorIndexingStatus<any, any>[]>(
     "/api/manage/admin/connector/indexing-status",
     fetcher
   );
@@ -35,10 +38,8 @@ const Main = () => {
     data: credentialsData,
     isLoading: isCredentialsLoading,
     error: isCredentialsError,
-  } = useSWR<Credential<BookstackCredentialJson>[]>(
-    "/api/manage/credential",
-    fetcher
-  );
+    refreshCredentials,
+  } = usePublicCredentials();
 
   if (
     (!connectorIndexingStatuses && isConnectorIndexingStatusesLoading) ||
@@ -55,30 +56,34 @@ const Main = () => {
     return <div>Failed to load credentials</div>;
   }
 
-  const bookstackConnectorIndexingStatuses = connectorIndexingStatuses.filter(
+  const bookstackConnectorIndexingStatuses: ConnectorIndexingStatus<
+    BookstackConfig,
+    BookstackCredentialJson
+  >[] = connectorIndexingStatuses.filter(
     (connectorIndexingStatus) =>
       connectorIndexingStatus.connector.source === "bookstack"
   );
-  const bookstackCredential = credentialsData.filter(
-    (credential) => credential.credential_json?.bookstack_api_token_id
-  )[0];
+  const bookstackCredential: Credential<BookstackCredentialJson> | undefined =
+    credentialsData.find(
+      (credential) => credential.credential_json?.bookstack_api_token_id
+    );
 
   return (
     <>
       {popup}
-      <h2 className="font-bold mb-2 mt-6 ml-auto mr-auto">
+      <Title className="mb-2 mt-6 ml-auto mr-auto">
         Step 1: Provide your API details
-      </h2>
+      </Title>
 
       {bookstackCredential ? (
         <>
           <div className="flex mb-1 text-sm">
-            <p className="my-auto">Existing API Token: </p>
-            <p className="ml-1 italic my-auto max-w-md">
+            <Text className="my-auto">Existing API Token: </Text>
+            <Text className="ml-1 italic my-auto max-w-md">
               {bookstackCredential.credential_json?.bookstack_api_token_id}
-            </p>
+            </Text>
             <button
-              className="ml-1 hover:bg-gray-700 rounded-full p-1"
+              className="ml-1 hover:bg-hover rounded p-1"
               onClick={async () => {
                 if (bookstackConnectorIndexingStatuses.length > 0) {
                   setPopup({
@@ -88,8 +93,8 @@ const Main = () => {
                   });
                   return;
                 }
-                await deleteCredential(bookstackCredential.id);
-                mutate("/api/manage/credential");
+                await adminDeleteCredential(bookstackCredential.id);
+                refreshCredentials();
               }}
             >
               <TrashIcon />
@@ -98,15 +103,15 @@ const Main = () => {
         </>
       ) : (
         <>
-          <p className="text-sm">
+          <Text>
             To get started you&apos;ll need API token details for your BookStack
             instance. You can get these by editing your (or another) user
             account in BookStack and creating a token via the &apos;API
             Tokens&apos; section at the bottom. Your user account will require
             to be assigned a BookStack role which has the &apos;Access system
             API&apos; system permission assigned.
-          </p>
-          <div className="border-solid border-gray-600 border rounded-md p-6 mt-2 mb-4">
+          </Text>
+          <Card className="mt-2 mb-4">
             <CredentialForm<BookstackCredentialJson>
               formBody={
                 <>
@@ -143,24 +148,24 @@ const Main = () => {
               }}
               onSubmit={(isSuccess) => {
                 if (isSuccess) {
-                  mutate("/api/manage/credential");
+                  refreshCredentials();
                   mutate("/api/manage/admin/connector/indexing-status");
                 }
               }}
             />
-          </div>
+          </Card>
         </>
       )}
 
       {bookstackConnectorIndexingStatuses.length > 0 && (
         <>
-          <h2 className="font-bold mb-2 mt-6 ml-auto mr-auto">
+          <Title className="mb-2 mt-6 ml-auto mr-auto">
             BookStack indexing status
-          </h2>
-          <p className="text-sm mb-2">
+          </Title>
+          <Text className="mb-2">
             The latest page, chapter, book and shelf changes are fetched every
             10 minutes.
-          </p>
+          </Text>
           <div className="mb-2">
             <ConnectorsTable<BookstackConfig, BookstackCredentialJson>
               connectorIndexingStatuses={bookstackConnectorIndexingStatuses}
@@ -189,41 +194,34 @@ const Main = () => {
       {bookstackCredential &&
         bookstackConnectorIndexingStatuses.length === 0 && (
           <>
-            <div className="border-solid border-gray-600 border rounded-md p-6 mt-4">
+            <Card className="mt-4">
               <h2 className="font-bold mb-3">Create Connection</h2>
-              <p className="text-sm mb-4">
+              <Text className="mb-4">
                 Press connect below to start the connection to your BookStack
                 instance.
-              </p>
+              </Text>
               <ConnectorForm<BookstackConfig>
                 nameBuilder={(values) => `BookStackConnector`}
+                ccPairNameBuilder={(values) => `BookStackConnector`}
                 source="bookstack"
                 inputType="poll"
                 formBody={<></>}
                 validationSchema={Yup.object().shape({})}
                 initialValues={{}}
                 refreshFreq={10 * 60} // 10 minutes
-                onSubmit={async (isSuccess, responseJson) => {
-                  if (isSuccess && responseJson) {
-                    await linkCredential(
-                      responseJson.id,
-                      bookstackCredential.id
-                    );
-                    mutate("/api/manage/admin/connector/indexing-status");
-                  }
-                }}
+                credentialId={bookstackCredential.id}
               />
-            </div>
+            </Card>
           </>
         )}
 
       {!bookstackCredential && (
         <>
-          <p className="text-sm mb-4">
+          <Text className="mb-4">
             Please provide your API details in Step 1 first! Once done with
             that, you&apos;ll be able to start the connection then see indexing
             status.
-          </p>
+          </Text>
         </>
       )}
     </>
@@ -236,10 +234,9 @@ export default function Page() {
       <div className="mb-4">
         <HealthCheckBanner />
       </div>
-      <div className="border-solid border-gray-600 border-b mb-4 pb-2 flex">
-        <BookstackIcon size="32" />
-        <h1 className="text-3xl font-bold pl-2">BookStack</h1>
-      </div>
+
+      <AdminPageTitle icon={<BookstackIcon size={32} />} title="Bookstack" />
+
       <Main />
     </div>
   );

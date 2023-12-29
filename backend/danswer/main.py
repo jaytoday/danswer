@@ -1,31 +1,76 @@
+from typing import Any
+from typing import cast
+
 import nltk  # type:ignore
+import torch
 import uvicorn
-from danswer.auth.schemas import UserCreate
-from danswer.auth.schemas import UserRead
-from danswer.auth.schemas import UserUpdate
-from danswer.auth.users import auth_backend
-from danswer.auth.users import fastapi_users
-from danswer.auth.users import google_oauth_client
-from danswer.configs.app_configs import APP_HOST
-from danswer.configs.app_configs import APP_PORT
-from danswer.configs.app_configs import ENABLE_OAUTH
-from danswer.configs.app_configs import SECRET
-from danswer.configs.app_configs import TYPESENSE_DEFAULT_COLLECTION
-from danswer.configs.app_configs import WEB_DOMAIN
-from danswer.datastores.qdrant.indexing import list_qdrant_collections
-from danswer.datastores.typesense.store import check_typesense_collection_exist
-from danswer.datastores.typesense.store import create_typesense_collection
-from danswer.db.credentials import create_initial_public_credential
-from danswer.server.event_loading import router as event_processing_router
-from danswer.server.health import router as health_router
-from danswer.server.manage import router as admin_router
-from danswer.server.search_backend import router as backend_router
-from danswer.utils.logging import setup_logger
+from fastapi import APIRouter
 from fastapi import FastAPI
 from fastapi import Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from httpx_oauth.clients.google import GoogleOAuth2
+from sqlalchemy.orm import Session
+
+from danswer import __version__
+from danswer.auth.schemas import UserCreate
+from danswer.auth.schemas import UserRead
+from danswer.auth.schemas import UserUpdate
+from danswer.auth.users import auth_backend
+from danswer.auth.users import fastapi_users
+from danswer.chat.load_yamls import load_chat_yamls
+from danswer.configs.app_configs import APP_API_PREFIX
+from danswer.configs.app_configs import APP_HOST
+from danswer.configs.app_configs import APP_PORT
+from danswer.configs.app_configs import AUTH_TYPE
+from danswer.configs.app_configs import DISABLE_GENERATIVE_AI
+from danswer.configs.app_configs import MODEL_SERVER_HOST
+from danswer.configs.app_configs import MODEL_SERVER_PORT
+from danswer.configs.app_configs import OAUTH_CLIENT_ID
+from danswer.configs.app_configs import OAUTH_CLIENT_SECRET
+from danswer.configs.app_configs import SECRET
+from danswer.configs.app_configs import WEB_DOMAIN
+from danswer.configs.chat_configs import MULTILINGUAL_QUERY_EXPANSION
+from danswer.configs.constants import AuthType
+from danswer.configs.model_configs import ASYM_PASSAGE_PREFIX
+from danswer.configs.model_configs import ASYM_QUERY_PREFIX
+from danswer.configs.model_configs import DOCUMENT_ENCODER_MODEL
+from danswer.configs.model_configs import ENABLE_RERANKING_REAL_TIME_FLOW
+from danswer.configs.model_configs import FAST_GEN_AI_MODEL_VERSION
+from danswer.configs.model_configs import GEN_AI_API_ENDPOINT
+from danswer.configs.model_configs import GEN_AI_MODEL_PROVIDER
+from danswer.configs.model_configs import GEN_AI_MODEL_VERSION
+from danswer.db.connector import create_initial_default_connector
+from danswer.db.connector_credential_pair import associate_default_cc_pair
+from danswer.db.credentials import create_initial_public_credential
+from danswer.db.engine import get_sqlalchemy_engine
+from danswer.document_index.factory import get_default_document_index
+from danswer.llm.factory import get_default_llm
+from danswer.search.search_nlp_models import warm_up_models
+from danswer.server.danswer_api.ingestion import get_danswer_api_key
+from danswer.server.danswer_api.ingestion import router as danswer_api_router
+from danswer.server.documents.cc_pair import router as cc_pair_router
+from danswer.server.documents.connector import router as connector_router
+from danswer.server.documents.credential import router as credential_router
+from danswer.server.documents.document import router as document_router
+from danswer.server.features.document_set.api import router as document_set_router
+from danswer.server.features.persona.api import admin_router as admin_persona_router
+from danswer.server.features.persona.api import basic_router as persona_router
+from danswer.server.features.prompt.api import basic_router as prompt_router
+from danswer.server.manage.administrative import router as admin_router
+from danswer.server.manage.get_state import router as state_router
+from danswer.server.manage.slack_bot import router as slack_bot_management_router
+from danswer.server.manage.users import router as user_router
+from danswer.server.query_and_chat.chat_backend import router as chat_router
+from danswer.server.query_and_chat.query_backend import (
+    admin_router as admin_query_router,
+)
+from danswer.server.query_and_chat.query_backend import basic_router as query_router
+from danswer.utils.logger import setup_logger
+from danswer.utils.telemetry import optional_telemetry
+from danswer.utils.telemetry import RecordType
+from danswer.utils.variable_functionality import fetch_versioned_implementation
 
 
 logger = setup_logger()
@@ -41,64 +86,115 @@ def validation_exception_handler(
 
 
 def value_error_handler(_: Request, exc: ValueError) -> JSONResponse:
+    try:
+        raise (exc)
+    except Exception:
+        # log stacktrace
+        logger.exception("ValueError")
     return JSONResponse(
         status_code=400,
         content={"message": str(exc)},
     )
 
 
-def get_application() -> FastAPI:
-    application = FastAPI(title="Internal Search QA Backend", debug=True, version="0.1")
-    application.include_router(backend_router)
-    application.include_router(event_processing_router)
-    application.include_router(admin_router)
-    application.include_router(health_router)
+def include_router_with_global_prefix_prepended(
+    application: FastAPI, router: APIRouter, **kwargs: Any
+) -> None:
+    """Adds the global prefix to all routes in the router."""
+    processed_global_prefix = f"/{APP_API_PREFIX.strip('/')}" if APP_API_PREFIX else ""
 
-    application.include_router(
-        fastapi_users.get_auth_router(auth_backend),
-        prefix="/auth/database",
-        tags=["auth"],
+    passed_in_prefix = cast(str | None, kwargs.get("prefix"))
+    if passed_in_prefix:
+        final_prefix = f"{processed_global_prefix}/{passed_in_prefix.strip('/')}"
+    else:
+        final_prefix = f"{processed_global_prefix}"
+    final_kwargs: dict[str, Any] = {
+        **kwargs,
+        "prefix": final_prefix,
+    }
+
+    application.include_router(router, **final_kwargs)
+
+
+def get_application() -> FastAPI:
+    application = FastAPI(title="Danswer Backend", version=__version__)
+
+    include_router_with_global_prefix_prepended(application, chat_router)
+    include_router_with_global_prefix_prepended(application, query_router)
+    include_router_with_global_prefix_prepended(application, document_router)
+    include_router_with_global_prefix_prepended(application, admin_query_router)
+    include_router_with_global_prefix_prepended(application, admin_router)
+    include_router_with_global_prefix_prepended(application, user_router)
+    include_router_with_global_prefix_prepended(application, connector_router)
+    include_router_with_global_prefix_prepended(application, credential_router)
+    include_router_with_global_prefix_prepended(application, cc_pair_router)
+    include_router_with_global_prefix_prepended(application, document_set_router)
+    include_router_with_global_prefix_prepended(
+        application, slack_bot_management_router
     )
-    application.include_router(
-        fastapi_users.get_register_router(UserRead, UserCreate),
-        prefix="/auth",
-        tags=["auth"],
-    )
-    application.include_router(
-        fastapi_users.get_reset_password_router(),
-        prefix="/auth",
-        tags=["auth"],
-    )
-    application.include_router(
-        fastapi_users.get_verify_router(UserRead),
-        prefix="/auth",
-        tags=["auth"],
-    )
-    application.include_router(
-        fastapi_users.get_users_router(UserRead, UserUpdate),
-        prefix="/users",
-        tags=["users"],
-    )
-    if ENABLE_OAUTH:
-        application.include_router(
+    include_router_with_global_prefix_prepended(application, persona_router)
+    include_router_with_global_prefix_prepended(application, admin_persona_router)
+    include_router_with_global_prefix_prepended(application, prompt_router)
+    include_router_with_global_prefix_prepended(application, state_router)
+    include_router_with_global_prefix_prepended(application, danswer_api_router)
+
+    if AUTH_TYPE == AuthType.DISABLED:
+        # Server logs this during auth setup verification step
+        pass
+
+    elif AUTH_TYPE == AuthType.BASIC:
+        include_router_with_global_prefix_prepended(
+            application,
+            fastapi_users.get_auth_router(auth_backend),
+            prefix="/auth",
+            tags=["auth"],
+        )
+        include_router_with_global_prefix_prepended(
+            application,
+            fastapi_users.get_register_router(UserRead, UserCreate),
+            prefix="/auth",
+            tags=["auth"],
+        )
+        include_router_with_global_prefix_prepended(
+            application,
+            fastapi_users.get_reset_password_router(),
+            prefix="/auth",
+            tags=["auth"],
+        )
+        include_router_with_global_prefix_prepended(
+            application,
+            fastapi_users.get_verify_router(UserRead),
+            prefix="/auth",
+            tags=["auth"],
+        )
+        include_router_with_global_prefix_prepended(
+            application,
+            fastapi_users.get_users_router(UserRead, UserUpdate),
+            prefix="/users",
+            tags=["users"],
+        )
+
+    elif AUTH_TYPE == AuthType.GOOGLE_OAUTH:
+        oauth_client = GoogleOAuth2(OAUTH_CLIENT_ID, OAUTH_CLIENT_SECRET)
+        include_router_with_global_prefix_prepended(
+            application,
             fastapi_users.get_oauth_router(
-                google_oauth_client,
+                oauth_client,
                 auth_backend,
                 SECRET,
                 associate_by_email=True,
                 is_verified_by_default=True,
-                # points the user back to the login page, where we will call the
-                # /auth/google/callback endpoint + redirect them to the main app
-                redirect_url=f"{WEB_DOMAIN}/auth/google/callback",
+                # Points the user back to the login page
+                redirect_url=f"{WEB_DOMAIN}/auth/oauth/callback",
             ),
-            prefix="/auth/google",
+            prefix="/auth/oauth",
             tags=["auth"],
         )
-        application.include_router(
-            fastapi_users.get_oauth_associate_router(
-                google_oauth_client, UserRead, SECRET
-            ),
-            prefix="/auth/associate/google",
+        # Need basic auth router for `logout` endpoint
+        include_router_with_global_prefix_prepended(
+            application,
+            fastapi_users.get_logout_router(auth_backend),
+            prefix="/auth",
             tags=["auth"],
         )
 
@@ -110,51 +206,98 @@ def get_application() -> FastAPI:
 
     @application.on_event("startup")
     def startup_event() -> None:
-        # To avoid circular imports
-        from danswer.search.search_utils import (
-            warm_up_models,
+        verify_auth = fetch_versioned_implementation(
+            "danswer.auth.users", "verify_auth_setting"
         )
-        from danswer.datastores.qdrant.indexing import create_qdrant_collection
-        from danswer.configs.app_configs import QDRANT_DEFAULT_COLLECTION
+        # Will throw exception if an issue is found
+        verify_auth()
 
-        logger.info("Warming up local NLP models.")
-        warm_up_models()
+        # Danswer APIs key
+        api_key = get_danswer_api_key()
+        logger.info(f"Danswer API Key: {api_key}")
+
+        if OAUTH_CLIENT_ID and OAUTH_CLIENT_SECRET:
+            logger.info("Both OAuth Client ID and Secret are configured.")
+
+        if DISABLE_GENERATIVE_AI:
+            logger.info("Generative AI Q&A disabled")
+        else:
+            logger.info(f"Using LLM Provider: {GEN_AI_MODEL_PROVIDER}")
+            logger.info(f"Using LLM Model Version: {GEN_AI_MODEL_VERSION}")
+            if GEN_AI_MODEL_VERSION != FAST_GEN_AI_MODEL_VERSION:
+                logger.info(
+                    f"Using Fast LLM Model Version: {FAST_GEN_AI_MODEL_VERSION}"
+                )
+            if GEN_AI_API_ENDPOINT:
+                logger.info(f"Using LLM Endpoint: {GEN_AI_API_ENDPOINT}")
+
+        if MULTILINGUAL_QUERY_EXPANSION:
+            logger.info(
+                f"Using multilingual flow with languages: {MULTILINGUAL_QUERY_EXPANSION}"
+            )
+
+        if ENABLE_RERANKING_REAL_TIME_FLOW:
+            logger.info("Reranking step of search flow is enabled.")
+
+        logger.info(f'Using Embedding model: "{DOCUMENT_ENCODER_MODEL}"')
+        if ASYM_QUERY_PREFIX or ASYM_PASSAGE_PREFIX:
+            logger.info(f'Query embedding prefix: "{ASYM_QUERY_PREFIX}"')
+            logger.info(f'Passage embedding prefix: "{ASYM_PASSAGE_PREFIX}"')
+
+        if MODEL_SERVER_HOST:
+            logger.info(
+                f"Using Model Server: http://{MODEL_SERVER_HOST}:{MODEL_SERVER_PORT}"
+            )
+        else:
+            logger.info("Warming up local NLP models.")
+            warm_up_models(skip_cross_encoders=not ENABLE_RERANKING_REAL_TIME_FLOW)
+
+            if torch.cuda.is_available():
+                logger.info("GPU is available")
+            else:
+                logger.info("GPU is not available")
+            logger.info(f"Torch Threads: {torch.get_num_threads()}")
+
+        # This is for the LLM, most LLMs will not need warming up
+        get_default_llm().log_model_configs()
 
         logger.info("Verifying query preprocessing (NLTK) data is downloaded")
-        nltk.download("stopwords")
-        nltk.download("wordnet")
-        nltk.download("punkt")
+        nltk.download("stopwords", quiet=True)
+        nltk.download("wordnet", quiet=True)
+        nltk.download("punkt", quiet=True)
 
-        logger.info("Verifying public credential exists.")
-        create_initial_public_credential()
+        logger.info("Verifying default connector/credential exist.")
+        with Session(get_sqlalchemy_engine(), expire_on_commit=False) as db_session:
+            create_initial_public_credential(db_session)
+            create_initial_default_connector(db_session)
+            associate_default_cc_pair(db_session)
 
-        logger.info("Verifying Document Indexes are available.")
-        if QDRANT_DEFAULT_COLLECTION not in {
-            collection.name for collection in list_qdrant_collections().collections
-        }:
-            logger.info(
-                f"Creating Qdrant collection with name: {QDRANT_DEFAULT_COLLECTION}"
-            )
-            create_qdrant_collection(collection_name=QDRANT_DEFAULT_COLLECTION)
-        if not check_typesense_collection_exist(TYPESENSE_DEFAULT_COLLECTION):
-            logger.info(
-                f"Creating Typesense collection with name: {TYPESENSE_DEFAULT_COLLECTION}"
-            )
-            create_typesense_collection(collection_name=TYPESENSE_DEFAULT_COLLECTION)
+        logger.info("Loading default Prompts and Personas")
+        load_chat_yamls()
+
+        logger.info("Verifying Document Index(s) is/are available.")
+        get_default_document_index().ensure_indices_exist()
+
+        optional_telemetry(
+            record_type=RecordType.VERSION, data={"version": __version__}
+        )
+
+    application.add_middleware(
+        CORSMiddleware,
+        allow_origins=["*"],  # Change this to the list of allowed origins if needed
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
 
     return application
 
 
 app = get_application()
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],  # Change this to the list of allowed origins if needed
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
 
 
 if __name__ == "__main__":
-    logger.info(f"Running QA Service on http://{APP_HOST}:{str(APP_PORT)}/")
+    logger.info(
+        f"Starting Danswer Backend version {__version__} on http://{APP_HOST}:{str(APP_PORT)}/"
+    )
     uvicorn.run(app, host=APP_HOST, port=APP_PORT)

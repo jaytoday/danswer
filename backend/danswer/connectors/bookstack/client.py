@@ -1,13 +1,18 @@
+from typing import Any
+
 import requests
+
 
 class BookStackClientRequestFailedError(ConnectionError):
     def __init__(self, status: int, error: str) -> None:
         super().__init__(
-            "BookStack Client request failed with status {status}: {error}".format(status=status, error=error)
+            "BookStack Client request failed with status {status}: {error}".format(
+                status=status, error=error
+            )
         )
 
-class BookStackApiClient:
 
+class BookStackApiClient:
     def __init__(
         self,
         base_url: str,
@@ -18,16 +23,15 @@ class BookStackApiClient:
         self.token_id = token_id
         self.token_secret = token_secret
 
-    def get(self, endpoint: str, params: dict[str, str]):
+    def get(self, endpoint: str, params: dict[str, str]) -> dict[str, Any]:
         url: str = self._build_url(endpoint)
         headers = self._build_headers()
         response = requests.get(url, headers=headers, params=params)
 
         try:
             json = response.json()
-        except:
+        except Exception:
             json = {}
-            pass
 
         if response.status_code >= 300:
             error = response.reason
@@ -38,15 +42,15 @@ class BookStackApiClient:
 
         return json
 
-    def _build_headers(self):
-        auth = 'Token ' + self.token_id + ':' + self.token_secret
+    def _build_headers(self) -> dict[str, str]:
+        auth = "Token " + self.token_id + ":" + self.token_secret
         return {
-            'Authorization': auth,
-            'Accept': 'application/json',
+            "Authorization": auth,
+            "Accept": "application/json",
         }
 
-    def _build_url(self, endpoint: str):
-        return self.base_url.rstrip('/') + '/api/' + endpoint.lstrip('/')
+    def _build_url(self, endpoint: str) -> str:
+        return self.base_url.rstrip("/") + "/api/" + endpoint.lstrip("/")
 
-    def build_app_url(self, endpoint: str):
-        return self.base_url.rstrip('/') + '/' + endpoint.lstrip('/')
+    def build_app_url(self, endpoint: str) -> str:
+        return self.base_url.rstrip("/") + "/" + endpoint.lstrip("/")

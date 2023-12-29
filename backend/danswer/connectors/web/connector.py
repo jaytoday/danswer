@@ -1,23 +1,44 @@
 import io
+from enum import Enum
 from typing import Any
 from typing import cast
+from typing import Tuple
 from urllib.parse import urljoin
 from urllib.parse import urlparse
 
 import requests
 from bs4 import BeautifulSoup
+from oauthlib.oauth2 import BackendApplicationClient
+from playwright.sync_api import BrowserContext
+from playwright.sync_api import Playwright
+from playwright.sync_api import sync_playwright
+from requests_oauthlib import OAuth2Session  # type:ignore
+
 from danswer.configs.app_configs import INDEX_BATCH_SIZE
+from danswer.configs.app_configs import WEB_CONNECTOR_OAUTH_CLIENT_ID
+from danswer.configs.app_configs import WEB_CONNECTOR_OAUTH_CLIENT_SECRET
+from danswer.configs.app_configs import WEB_CONNECTOR_OAUTH_TOKEN_URL
 from danswer.configs.constants import DocumentSource
-from danswer.configs.constants import HTML_SEPARATOR
+from danswer.connectors.cross_connector_utils.file_utils import read_pdf_file
+from danswer.connectors.cross_connector_utils.html_utils import web_html_cleanup
 from danswer.connectors.interfaces import GenerateDocumentsOutput
 from danswer.connectors.interfaces import LoadConnector
 from danswer.connectors.models import Document
 from danswer.connectors.models import Section
-from danswer.utils.logging import setup_logger
-from playwright.sync_api import sync_playwright
-from PyPDF2 import PdfReader
+from danswer.utils.logger import setup_logger
 
 logger = setup_logger()
+
+
+class WEB_CONNECTOR_VALID_SETTINGS(str, Enum):
+    # Given a base site, index everything under that path
+    RECURSIVE = "recursive"
+    # Given a URL, index only the given page
+    SINGLE = "single"
+    # Given a sitemap.xml URL, parse all the pages in it
+    SITEMAP = "sitemap"
+    # Given a file upload where every line is a URL, parse all the URLs provided
+    UPLOAD = "upload"
 
 
 def is_valid_url(url: str) -> bool:
@@ -42,8 +63,6 @@ def get_internal_links(
 
         if not is_valid_url(href):
             # Relative path handling
-            if url[-1] != "/":
-                url += "/"
             href = urljoin(url, href)
 
         if urlparse(href).netloc == urlparse(url).netloc and base_url in href:
@@ -51,16 +70,83 @@ def get_internal_links(
     return internal_links
 
 
+def start_playwright() -> Tuple[Playwright, BrowserContext]:
+    playwright = sync_playwright().start()
+    browser = playwright.chromium.launch(headless=True)
+
+    context = browser.new_context()
+
+    if (
+        WEB_CONNECTOR_OAUTH_CLIENT_ID
+        and WEB_CONNECTOR_OAUTH_CLIENT_SECRET
+        and WEB_CONNECTOR_OAUTH_TOKEN_URL
+    ):
+        client = BackendApplicationClient(client_id=WEB_CONNECTOR_OAUTH_CLIENT_ID)
+        oauth = OAuth2Session(client=client)
+        token = oauth.fetch_token(
+            token_url=WEB_CONNECTOR_OAUTH_TOKEN_URL,
+            client_id=WEB_CONNECTOR_OAUTH_CLIENT_ID,
+            client_secret=WEB_CONNECTOR_OAUTH_CLIENT_SECRET,
+        )
+        context.set_extra_http_headers(
+            {"Authorization": "Bearer {}".format(token["access_token"])}
+        )
+
+    return playwright, context
+
+
+def extract_urls_from_sitemap(sitemap_url: str) -> list[str]:
+    response = requests.get(sitemap_url)
+    response.raise_for_status()
+
+    soup = BeautifulSoup(response.content, "html.parser")
+    urls = [loc_tag.text for loc_tag in soup.find_all("loc")]
+
+    return urls
+
+
+def _ensure_valid_url(url: str) -> str:
+    if "://" not in url:
+        return "https://" + url
+    return url
+
+
+def _read_urls_file(location: str) -> list[str]:
+    with open(location, "r") as f:
+        urls = [_ensure_valid_url(line.strip()) for line in f if line.strip()]
+    return urls
+
+
 class WebConnector(LoadConnector):
     def __init__(
         self,
-        base_url: str,
+        base_url: str,  # Can't change this without disrupting existing users
+        web_connector_type: str = WEB_CONNECTOR_VALID_SETTINGS.RECURSIVE.value,
+        mintlify_cleanup: bool = True,  # Mostly ok to apply to other websites as well
         batch_size: int = INDEX_BATCH_SIZE,
     ) -> None:
-        if "://" not in base_url:
-            base_url = "https://" + base_url
-        self.base_url = base_url
+        self.mintlify_cleanup = mintlify_cleanup
         self.batch_size = batch_size
+        self.recursive = False
+
+        if web_connector_type == WEB_CONNECTOR_VALID_SETTINGS.RECURSIVE.value:
+            self.recursive = True
+            self.to_visit_list = [_ensure_valid_url(base_url)]
+            return
+
+        elif web_connector_type == WEB_CONNECTOR_VALID_SETTINGS.SINGLE.value:
+            self.to_visit_list = [_ensure_valid_url(base_url)]
+
+        elif web_connector_type == WEB_CONNECTOR_VALID_SETTINGS.SITEMAP:
+            self.to_visit_list = extract_urls_from_sitemap(_ensure_valid_url(base_url))
+
+        elif web_connector_type == WEB_CONNECTOR_VALID_SETTINGS.UPLOAD:
+            self.to_visit_list = _read_urls_file(base_url)
+
+        else:
+            raise ValueError(
+                "Invalid Web Connector Config, must choose a valid type between: " ""
+            )
 
     def load_credentials(self, credentials: dict[str, Any]) -> dict[str, Any] | None:
         if credentials:
@@ -71,32 +157,31 @@ class WebConnector(LoadConnector):
         """Traverses through all pages found on the website
         and converts them into documents"""
         visited_links: set[str] = set()
-        to_visit: list[str] = [self.base_url]
+        to_visit: list[str] = self.to_visit_list
+        base_url = to_visit[0]  # For the recursive case
         doc_batch: list[Document] = []
 
-        restart_playwright = True
+        playwright, context = start_playwright()
+        restart_playwright = False
         while to_visit:
             current_url = to_visit.pop()
             if current_url in visited_links:
                 continue
             visited_links.add(current_url)
 
-            logger.info(f"Indexing {current_url}")
+            logger.info(f"Visiting {current_url}")
 
             try:
                 if restart_playwright:
-                    playwright = sync_playwright().start()
-                    browser = playwright.chromium.launch(headless=True)
-                    context = browser.new_context()
+                    playwright, context = start_playwright()
                     restart_playwright = False
 
                 if current_url.split(".")[-1] == "pdf":
                     # PDF files are not checked for links
                     response = requests.get(current_url)
-                    pdf_reader = PdfReader(io.BytesIO(response.content))
-                    page_text = ""
-                    for pdf_page in pdf_reader.pages:
-                        page_text += pdf_page.extract_text()
+                    page_text = read_pdf_file(
+                        file=io.BytesIO(response.content), file_name=current_url
+                    )
 
                     doc_batch.append(
                         Document(
@@ -116,50 +201,29 @@ class WebConnector(LoadConnector):
                     logger.info(f"Redirected to {final_page}")
                     current_url = final_page
                     if current_url in visited_links:
-                        logger.info(f"Redirected page already indexed")
+                        logger.info("Redirected page already indexed")
                         continue
                     visited_links.add(current_url)
 
                 content = page.content()
                 soup = BeautifulSoup(content, "html.parser")
 
-                internal_links = get_internal_links(self.base_url, current_url, soup)
-                for link in internal_links:
-                    if link not in visited_links:
-                        to_visit.append(link)
+                if self.recursive:
+                    internal_links = get_internal_links(base_url, current_url, soup)
+                    for link in internal_links:
+                        if link not in visited_links:
+                            to_visit.append(link)
 
-                title_tag = soup.find("title")
-                title = None
-                if title_tag and title_tag.text:
-                    title = title_tag.text
-
-                # Heuristics based cleaning
-                for undesired_div in ["sidebar", "header", "footer"]:
-                    [
-                        tag.extract()
-                        for tag in soup.find_all(
-                            "div", class_=lambda x: x and undesired_div in x.split()
-                        )
-                    ]
-
-                for undesired_tag in [
-                    "nav",
-                    "header",
-                    "footer",
-                    "meta",
-                    "script",
-                    "style",
-                ]:
-                    [tag.extract() for tag in soup.find_all(undesired_tag)]
-
-                page_text = soup.get_text(HTML_SEPARATOR)
+                parsed_html = web_html_cleanup(soup, self.mintlify_cleanup)
 
                 doc_batch.append(
                     Document(
                         id=current_url,
-                        sections=[Section(link=current_url, text=page_text)],
+                        sections=[
+                            Section(link=current_url, text=parsed_html.cleaned_text)
+                        ],
                         source=DocumentSource.WEB,
-                        semantic_identifier=title,
+                        semantic_identifier=parsed_html.title or current_url,
                         metadata={},
                     )
                 )
@@ -180,3 +244,9 @@ class WebConnector(LoadConnector):
         if doc_batch:
             playwright.stop()
             yield doc_batch
+
+
+if __name__ == "__main__":
+    connector = WebConnector("https://docs.danswer.dev/")
+    document_batches = connector.load_from_state()
+    print(next(document_batches))

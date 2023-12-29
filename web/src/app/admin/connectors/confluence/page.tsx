@@ -8,16 +8,50 @@ import { CredentialForm } from "@/components/admin/connectors/CredentialForm";
 import {
   ConfluenceCredentialJson,
   ConfluenceConfig,
-  Credential,
   ConnectorIndexingStatus,
+  Credential,
 } from "@/lib/types";
 import useSWR, { useSWRConfig } from "swr";
 import { fetcher } from "@/lib/fetcher";
 import { LoadingAnimation } from "@/components/Loading";
-import { deleteCredential, linkCredential } from "@/lib/credential";
+import { adminDeleteCredential, linkCredential } from "@/lib/credential";
 import { ConnectorForm } from "@/components/admin/connectors/ConnectorForm";
 import { ConnectorsTable } from "@/components/admin/connectors/table/ConnectorsTable";
 import { usePopup } from "@/components/admin/connectors/Popup";
+import { usePublicCredentials } from "@/lib/hooks";
+import { Card, Divider, Text, Title } from "@tremor/react";
+import { AdminPageTitle } from "@/components/admin/Title";
+
+const extractSpaceFromCloudUrl = (wikiUrl: string): string => {
+  const parsedUrl = new URL(wikiUrl);
+  const space = parsedUrl.pathname.split("/")[3];
+  return space;
+};
+
+const extractSpaceFromDataCenterUrl = (wikiUrl: string): string => {
+  const DISPLAY = "/display/";
+
+  const parsedUrl = new URL(wikiUrl);
+  const spaceSpecificSection = parsedUrl.pathname
+    .split(DISPLAY)
+    .slice(1)
+    .join(DISPLAY);
+  const space = spaceSpecificSection.split("/")[0];
+  return space;
+};
+
+// Copied from the `extract_confluence_keys_from_url` function
+const extractSpaceFromUrl = (wikiUrl: string): string | null => {
+  try {
+    if (wikiUrl.includes(".atlassian.net/wiki/spaces/")) {
+      return extractSpaceFromCloudUrl(wikiUrl);
+    }
+    return extractSpaceFromDataCenterUrl(wikiUrl);
+  } catch (e) {
+    console.log("Failed to extract space from url", e);
+    return null;
+  }
+};
 
 const Main = () => {
   const { popup, setPopup } = usePopup();
@@ -27,7 +61,7 @@ const Main = () => {
     data: connectorIndexingStatuses,
     isLoading: isConnectorIndexingStatusesLoading,
     error: isConnectorIndexingStatusesError,
-  } = useSWR<ConnectorIndexingStatus<any>[]>(
+  } = useSWR<ConnectorIndexingStatus<any, any>[]>(
     "/api/manage/admin/connector/indexing-status",
     fetcher
   );
@@ -35,10 +69,8 @@ const Main = () => {
     data: credentialsData,
     isLoading: isCredentialsLoading,
     error: isCredentialsError,
-  } = useSWR<Credential<ConfluenceCredentialJson>[]>(
-    "/api/manage/credential",
-    fetcher
-  );
+    refreshCredentials,
+  } = usePublicCredentials();
 
   if (
     (!connectorIndexingStatuses && isConnectorIndexingStatusesLoading) ||
@@ -55,20 +87,24 @@ const Main = () => {
     return <div>Failed to load credentials</div>;
   }
 
-  const confluenceConnectorIndexingStatuses = connectorIndexingStatuses.filter(
+  const confluenceConnectorIndexingStatuses: ConnectorIndexingStatus<
+    ConfluenceConfig,
+    ConfluenceCredentialJson
+  >[] = connectorIndexingStatuses.filter(
     (connectorIndexingStatus) =>
       connectorIndexingStatus.connector.source === "confluence"
   );
-  const confluenceCredential = credentialsData.filter(
-    (credential) => credential.credential_json?.confluence_access_token
-  )[0];
+  const confluenceCredential: Credential<ConfluenceCredentialJson> | undefined =
+    credentialsData.find(
+      (credential) => credential.credential_json?.confluence_access_token
+    );
 
   return (
     <>
       {popup}
-      <h2 className="font-bold mb-2 mt-6 ml-auto mr-auto">
+      <Title className="mb-2 mt-6 ml-auto mr-auto">
         Step 1: Provide your access token
-      </h2>
+      </Title>
 
       {confluenceCredential ? (
         <>
@@ -84,7 +120,7 @@ const Main = () => {
               {confluenceCredential.credential_json?.confluence_access_token}
             </p>
             <button
-              className="ml-1 hover:bg-gray-700 rounded-full p-1"
+              className="ml-1 hover:bg-hover rounded p-1"
               onClick={async () => {
                 if (confluenceConnectorIndexingStatuses.length > 0) {
                   setPopup({
@@ -94,8 +130,8 @@ const Main = () => {
                   });
                   return;
                 }
-                await deleteCredential(confluenceCredential.id);
-                mutate("/api/manage/credential");
+                await adminDeleteCredential(confluenceCredential.id);
+                refreshCredentials();
               }}
             >
               <TrashIcon />
@@ -104,17 +140,18 @@ const Main = () => {
         </>
       ) : (
         <>
-          <p className="text-sm">
+          <Text>
             To use the Confluence connector, first follow the guide{" "}
             <a
-              className="text-blue-500"
+              className="text-link"
               href="https://docs.danswer.dev/connectors/confluence#setting-up"
+              target="_blank"
             >
               here
             </a>{" "}
             to generate an Access Token.
-          </p>
-          <div className="border-solid border-gray-600 border rounded-md p-6 mt-2">
+          </Text>
+          <Card className="mt-4">
             <CredentialForm<ConfluenceCredentialJson>
               formBody={
                 <>
@@ -140,11 +177,11 @@ const Main = () => {
               }}
               onSubmit={(isSuccess) => {
                 if (isSuccess) {
-                  mutate("/api/manage/credential");
+                  refreshCredentials();
                 }
               }}
             />
-          </div>
+          </Card>
         </>
       )}
 
@@ -199,14 +236,18 @@ const Main = () => {
                     {
                       header: "Url",
                       key: "url",
-                      getValue: (connector) => (
+                      getValue: (ccPairStatus) => (
                         <a
                           className="text-blue-500"
                           href={
-                            connector.connector_specific_config.wiki_page_url
+                            ccPairStatus.connector.connector_specific_config
+                              .wiki_page_url
                           }
                         >
-                          {connector.connector_specific_config.wiki_page_url}
+                          {
+                            ccPairStatus.connector.connector_specific_config
+                              .wiki_page_url
+                          }
                         </a>
                       ),
                     },
@@ -216,14 +257,18 @@ const Main = () => {
                   }
                 />
               </div>
+              <Divider />
             </>
           )}
 
-          <div className="border-solid border-gray-600 border rounded-md p-6 mt-4">
+          <Card className="mt-4">
             <h2 className="font-bold mb-3">Add a New Space</h2>
             <ConnectorForm<ConfluenceConfig>
               nameBuilder={(values) =>
                 `ConfluenceConnector-${values.wiki_page_url}`
+              }
+              ccPairNameBuilder={(values) =>
+                extractSpaceFromUrl(values.wiki_page_url)
               }
               source="confluence"
               inputType="poll"
@@ -241,24 +286,16 @@ const Main = () => {
                 wiki_page_url: "",
               }}
               refreshFreq={10 * 60} // 10 minutes
-              onSubmit={async (isSuccess, responseJson) => {
-                if (isSuccess && responseJson) {
-                  await linkCredential(
-                    responseJson.id,
-                    confluenceCredential.id
-                  );
-                  mutate("/api/manage/admin/connector/indexing-status");
-                }
-              }}
+              credentialId={confluenceCredential.id}
             />
-          </div>
+          </Card>
         </>
       ) : (
-        <p className="text-sm">
+        <Text>
           Please provide your access token in Step 1 first! Once done with that,
           you can then specify which Confluence spaces you want to make
           searchable.
-        </p>
+        </Text>
       )}
     </>
   );
@@ -270,10 +307,9 @@ export default function Page() {
       <div className="mb-4">
         <HealthCheckBanner />
       </div>
-      <div className="border-solid border-gray-600 border-b mb-4 pb-2 flex">
-        <ConfluenceIcon size="32" />
-        <h1 className="text-3xl font-bold pl-2">Confluence</h1>
-      </div>
+
+      <AdminPageTitle icon={<ConfluenceIcon size={32} />} title="Confluence" />
+
       <Main />
     </div>
   );

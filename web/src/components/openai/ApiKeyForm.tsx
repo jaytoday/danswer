@@ -2,8 +2,9 @@ import { Form, Formik } from "formik";
 import { Popup } from "../admin/connectors/Popup";
 import { useState } from "react";
 import { TextFormField } from "../admin/connectors/Field";
-import { OPENAI_API_KEY_URL } from "./constants";
+import { GEN_AI_API_KEY_URL } from "./constants";
 import { LoadingAnimation } from "../Loading";
+import { Button } from "@tremor/react";
 
 interface Props {
   handleResponse?: (response: Response) => void;
@@ -21,7 +22,7 @@ export const ApiKeyForm = ({ handleResponse }: Props) => {
       <Formik
         initialValues={{ apiKey: "" }}
         onSubmit={async ({ apiKey }, formikHelpers) => {
-          const response = await fetch(OPENAI_API_KEY_URL, {
+          const response = await fetch(GEN_AI_API_KEY_URL, {
             method: "PUT",
             headers: {
               "Content-Type": "application/json",
@@ -65,17 +66,13 @@ export const ApiKeyForm = ({ handleResponse }: Props) => {
                 label="OpenAI API Key:"
               />
               <div className="flex">
-                <button
+                <Button
                   type="submit"
                   disabled={isSubmitting}
-                  className={
-                    "bg-slate-500 hover:bg-slate-700 text-white " +
-                    "font-bold py-2 px-4 rounded focus:outline-none " +
-                    "focus:shadow-outline w-full mx-auto"
-                  }
+                  className="w-64 mx-auto"
                 >
                   Submit
-                </button>
+                </Button>
               </div>
             </Form>
           )

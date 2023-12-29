@@ -28,32 +28,22 @@ spec:
     spec:
       containers:
       - name: api-server
-        image: danswer/danswer-api-server:latest
+        image: danswer/danswer-backend:latest
         imagePullPolicy: IfNotPresent
+        command:
+          - "/bin/sh"
+          - "-c"
+          - |
+            alembic upgrade head &&
+            echo "Starting Danswer Api Server" &&
+            uvicorn danswer.main:app --host 0.0.0.0 --port 8080
         ports:
         - containerPort: 8080
-        env:
-        - name: POSTGRES_HOST
-          value: relational-db-service
-        - name: QDRANT_HOST
-          value: vector-db-service
-        - name: TYPESENSE_HOST
-          value: search-engine-service
-        - name: TYPESENSE_API_KEY
-          valueFrom:
-            secretKeyRef:
-              name: danswer-secrets
-              key: typesense_api_key
-        - name: GOOGLE_OAUTH_CLIENT_ID
-          valueFrom:
-            secretKeyRef:
-              name: danswer-secrets
-              key: google_oauth_client_id
-        - name: GOOGLE_OAUTH_CLIENT_SECRET
-          valueFrom:
-            secretKeyRef:
-              name: danswer-secrets
-              key: google_oauth_client_secret
+        # There are some extra values since this is shared between services
+        # There are no conflicts though, extra env variables are simply ignored
+        envFrom:
+        - configMapRef:
+            name: env-configmap
         volumeMounts:
         - name: dynamic-storage
           mountPath: /home/storage

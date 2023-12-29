@@ -1,7 +1,7 @@
 """Create IndexAttempt table
 
 Revision ID: 47433d30de82
-Revises: 
+Revises:
 Create Date: 2023-05-04 00:55:32.971991
 
 """
@@ -59,6 +59,7 @@ def upgrade() -> None:
                 "SUCCESS",
                 "FAILED",
                 name="indexingstatus",
+                native_enum=False,
             ),
             nullable=False,
         ),
@@ -70,4 +71,3 @@ def upgrade() -> None:
 
 def downgrade() -> None:
     op.drop_table("index_attempt")
-    sa.Enum(name="indexingstatus").drop(op.get_bind(), checkfirst=False)

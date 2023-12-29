@@ -12,6 +12,8 @@ export const metadata = {
   description: "Question answering for your documents",
 };
 
+export const dynamic = "force-dynamic";
+
 export default async function RootLayout({
   children,
 }: {
@@ -19,7 +21,9 @@ export default async function RootLayout({
 }) {
   return (
     <html lang="en">
-      <body className={`${inter.variable} font-sans bg-gray-900 text-gray-100`}>
+      <body
+        className={`${inter.variable} font-sans text-default bg-background`}
+      >
         {children}
       </body>
     </html>

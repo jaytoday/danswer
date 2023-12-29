@@ -1,206 +1,128 @@
 "use client";
 
+import * as Yup from "yup";
 import { GoogleDriveIcon } from "@/components/icons/icons";
 import useSWR, { useSWRConfig } from "swr";
 import { fetcher } from "@/lib/fetcher";
 import { LoadingAnimation } from "@/components/Loading";
-import { useRouter } from "next/navigation";
-import { Popup, PopupSpec } from "@/components/admin/connectors/Popup";
-import { useState } from "react";
+import { PopupSpec, usePopup } from "@/components/admin/connectors/Popup";
 import { HealthCheckBanner } from "@/components/health/healthcheck";
-import { Button } from "@/components/Button";
 import {
-  Connector,
-  ConnectorBase,
   ConnectorIndexingStatus,
   Credential,
+  GoogleDriveConfig,
   GoogleDriveCredentialJson,
+  GoogleDriveServiceAccountCredentialJson,
 } from "@/lib/types";
-import { deleteConnector, deleteConnectorIfExists } from "@/lib/connector";
-import { StatusRow } from "@/components/admin/connectors/table/ConnectorsTable";
-import { setupGoogleDriveOAuth } from "@/lib/googleDrive";
-import Cookies from "js-cookie";
-import { GOOGLE_DRIVE_AUTH_IS_ADMIN_COOKIE_NAME } from "@/lib/constants";
-import { deleteCredential, linkCredential } from "@/lib/credential";
-
-const AppCredentialUpload = ({
-  setPopup,
-}: {
-  setPopup: (popupSpec: PopupSpec | null) => void;
-}) => {
-  const [appCredentialJsonStr, setAppCredentialJsonStr] = useState<
-    string | undefined
-  >();
-
-  return (
-    <>
-      <input
-        className={
-          "mr-3 text-sm text-gray-900 border border-gray-300 rounded-lg " +
-          "cursor-pointer bg-gray-50 dark:text-gray-400 focus:outline-none " +
-          "dark:bg-gray-700 dark:border-gray-600 dark:placeholder-gray-400"
-        }
-        type="file"
-        accept=".json"
-        onChange={(event) => {
-          if (!event.target.files) {
-            return;
-          }
-          const file = event.target.files[0];
-          const reader = new FileReader();
-
-          reader.onload = function (loadEvent) {
-            if (!loadEvent?.target?.result) {
-              return;
-            }
-            const fileContents = loadEvent.target.result;
-            setAppCredentialJsonStr(fileContents as string);
-          };
-
-          reader.readAsText(file);
-        }}
-      />
-
-      <Button
-        disabled={!appCredentialJsonStr}
-        onClick={async () => {
-          const response = await fetch(
-            "/api/manage/admin/connector/google-drive/app-credential",
-            {
-              method: "PUT",
-              headers: {
-                "Content-Type": "application/json",
-              },
-              body: appCredentialJsonStr,
-            }
-          );
-          if (response.ok) {
-            setPopup({
-              message: "Successfully uploaded app credentials",
-              type: "success",
-            });
-          } else {
-            setPopup({
-              message: `Failed to upload app credentials - ${response.status}`,
-              type: "error",
-            });
-          }
-        }}
-      >
-        Upload
-      </Button>
-    </>
-  );
-};
+import { linkCredential } from "@/lib/credential";
+import { ConnectorForm } from "@/components/admin/connectors/ConnectorForm";
+import {
+  BooleanFormField,
+  TextArrayFieldBuilder,
+} from "@/components/admin/connectors/Field";
+import { GoogleDriveConnectorsTable } from "./GoogleDriveConnectorsTable";
+import { googleDriveConnectorNameBuilder } from "./utils";
+import { DriveOAuthSection, DriveJsonUploadSection } from "./Credential";
+import { usePublicCredentials } from "@/lib/hooks";
+import { AdminPageTitle } from "@/components/admin/Title";
+import { Card, Divider, Text, Title } from "@tremor/react";
 
 interface GoogleDriveConnectorManagementProps {
-  googleDrivePublicCredential:
-    | Credential<GoogleDriveCredentialJson>
-    | undefined;
-  googleDriveConnectorIndexingStatus: ConnectorIndexingStatus<{}> | null;
+  googleDrivePublicCredential?: Credential<GoogleDriveCredentialJson>;
+  googleDriveServiceAccountCredential?: Credential<GoogleDriveServiceAccountCredentialJson>;
+  googleDriveConnectorIndexingStatus: ConnectorIndexingStatus<
+    GoogleDriveConfig,
+    GoogleDriveCredentialJson
+  > | null;
+  googleDriveConnectorIndexingStatuses: ConnectorIndexingStatus<
+    GoogleDriveConfig,
+    GoogleDriveCredentialJson
+  >[];
   credentialIsLinked: boolean;
   setPopup: (popupSpec: PopupSpec | null) => void;
 }
 
 const GoogleDriveConnectorManagement = ({
   googleDrivePublicCredential,
+  googleDriveServiceAccountCredential,
   googleDriveConnectorIndexingStatus,
+  googleDriveConnectorIndexingStatuses,
   credentialIsLinked,
   setPopup,
 }: GoogleDriveConnectorManagementProps) => {
   const { mutate } = useSWRConfig();
 
-  if (!googleDrivePublicCredential) {
+  const liveCredential =
+    googleDrivePublicCredential || googleDriveServiceAccountCredential;
+  if (!liveCredential) {
     return (
-      <p className="text-sm">
+      <Text>
         Please authenticate with Google Drive as described in Step 2! Once done
         with that, you can then move on to enable this connector.
-      </p>
+      </Text>
     );
   }
 
   // NOTE: if the connector has no credential linked, then it will not be
   // returned by the indexing-status API
-  if (!googleDriveConnectorIndexingStatus) {
-    return (
-      <>
-        <p className="text-sm mb-2">
-          Click the button below to create a connector. We will refresh the
-          latest documents from Google Drive every <b>10</b> minutes.
-        </p>
-        <Button
-          onClick={async () => {
-            // best effort check to see if existing connector exists
-            // delete it if it does, the current assumption is that only
-            // one google drive connector will exist at a time
-            const errorMsg = await deleteConnectorIfExists({
-              source: "google_drive",
-            });
-            if (errorMsg) {
-              setPopup({
-                message: `Unable to delete existing connector - ${errorMsg}`,
-                type: "error",
-              });
-              return;
-            }
-
-            const connectorBase: ConnectorBase<{}> = {
-              name: "GoogleDriveConnector",
-              input_type: "poll",
-              source: "google_drive",
-              connector_specific_config: {},
-              refresh_freq: 60 * 10, // 10 minutes
-              disabled: false,
-            };
-            const connectorCreationResponse = await fetch(
-              `/api/manage/admin/connector`,
-              {
-                method: "POST",
-                headers: {
-                  "Content-Type": "application/json",
-                },
-                body: JSON.stringify(connectorBase),
-              }
-            );
-            if (!connectorCreationResponse.ok) {
-              setPopup({
-                message: `Failed to create connector - ${connectorCreationResponse.status}`,
-                type: "error",
-              });
-              return;
-            }
-            const connector =
-              (await connectorCreationResponse.json()) as Connector<{}>;
-
-            const credentialLinkResponse = await fetch(
-              `/api/manage/connector/${connector.id}/credential/${googleDrivePublicCredential.id}`,
-              {
-                method: "PUT",
-                headers: {
-                  "Content-Type": "application/json",
-                },
-              }
-            );
-            if (!credentialLinkResponse.ok) {
-              setPopup({
-                message: `Failed to link connector to credential - ${credentialLinkResponse.status}`,
-                type: "error",
-              });
-              return;
-            }
-
-            setPopup({
-              message: "Successfully created connector!",
-              type: "success",
-            });
-            mutate("/api/manage/admin/connector/indexing-status");
-          }}
-        >
-          Add
-        </Button>
-      </>
-    );
-  }
+  // if (!googleDriveConnectorIndexingStatus) {
+  //   return (
+  //     <>
+  //       <p className="text-sm mb-2">
+  //         Fill out the form below to create a connector. We will refresh the
+  //         latest documents from Google Drive every <b>10</b> minutes.
+  //       </p>
+  //       <div className="border-solid border-gray-600 border rounded-md p-6 mt-4">
+  //         <h2 className="font-bold mb-3">Add Connector</h2>
+  //         <ConnectorForm<GoogleDriveConfig>
+  //           nameBuilder={googleDriveConnectorNameBuilder}
+  //           source="google_drive"
+  //           inputType="poll"
+  //           formBodyBuilder={(values) => (
+  //             <div>
+  //               {TextArrayFieldBuilder({
+  //                 name: "folder_paths",
+  //                 label: "Folder Paths",
+  //                 subtext:
+  //                   "Specify 0 or more folder paths to index! For example, specifying the path " +
+  //                   "'Engineering/Materials' will cause us to only index all files contained " +
+  //                   "within the 'Materials' folder within the 'Engineering' folder. " +
+  //                   "If no folder paths are specified, we will index all documents in your drive.",
+  //               })(values)}
+  //               <BooleanFormField
+  //                 name="include_shared"
+  //                 label="Include Shared"
+  //               />
+  //             </div>
+  //           )}
+  //           validationSchema={Yup.object().shape({
+  //             folder_paths: Yup.array()
+  //               .of(
+  //                 Yup.string().required(
+  //                   "Please specify a folder path for your google drive e.g. 'Engineering/Materials'"
+  //                 )
+  //               )
+  //               .required(),
+  //             include_shared: Yup.boolean().required(),
+  //           })}
+  //           initialValues={{
+  //             folder_paths: [],
+  //           }}
+  //           refreshFreq={10 * 60} // 10 minutes
+  //           onSubmit={async (isSuccess, responseJson) => {
+  //             if (isSuccess && responseJson) {
+  //               await linkCredential(
+  //                 responseJson.id,
+  //                 googleDrivePublicCredential.id
+  //               );
+  //               mutate("/api/manage/admin/connector/indexing-status");
+  //             }
+  //           }}
+  //         />
+  //       </div>
+  //     </>
+  //   );
+  // }
 
   // If the connector has no credential, we will just hit the ^ section.
   // Leaving this in for now in case we want to change this behavior later
@@ -231,207 +153,101 @@ const GoogleDriveConnectorManagement = ({
 
   return (
     <div>
-      <div className="text-sm mb-2">
-        <div className="flex mb-1">
-          The Google Drive connector is setup! <b className="mx-2">Status:</b>{" "}
-          <StatusRow
-            connectorIndexingStatus={googleDriveConnectorIndexingStatus}
-            hasCredentialsIssue={
-              googleDriveConnectorIndexingStatus.connector.credential_ids
-                .length === 0
+      <Text>
+        <div className="my-3">
+          {googleDriveConnectorIndexingStatuses.length > 0 ? (
+            <>
+              Checkout the{" "}
+              <a href="/admin/indexing/status" className="text-blue-500">
+                status page
+              </a>{" "}
+              for the latest indexing status. We fetch the latest documents from
+              Google Drive every <b>10</b> minutes.
+            </>
+          ) : (
+            <p className="text-sm mb-2">
+              Fill out the form below to create a connector. We will refresh the
+              latest documents from Google Drive every <b>10</b> minutes.
+            </p>
+          )}
+        </div>
+      </Text>
+      {googleDriveConnectorIndexingStatuses.length > 0 && (
+        <>
+          <div className="text-sm mb-2 font-bold">Existing Connectors:</div>
+          <GoogleDriveConnectorsTable
+            googleDriveConnectorIndexingStatuses={
+              googleDriveConnectorIndexingStatuses
             }
             setPopup={setPopup}
-            onUpdate={() => {
-              mutate("/api/manage/admin/connector/indexing-status");
-            }}
           />
-        </div>
-        <p>
-          Checkout the{" "}
-          <a href="/admin/indexing/status" className="text-blue-500">
-            status page
-          </a>{" "}
-          for the latest indexing status. We fetch the latest documents from
-          Google Drive every <b>10</b> minutes.
-        </p>
-      </div>
-      <Button
-        onClick={() => {
-          deleteConnector(googleDriveConnectorIndexingStatus.connector.id).then(
-            (errorMsg) => {
-              if (errorMsg) {
-                setPopup({
-                  message: `Unable to delete existing connector - ${errorMsg}`,
-                  type: "error",
-                });
-              } else {
-                setPopup({
-                  message: "Successfully deleted connector!",
-                  type: "success",
-                });
-                mutate("/api/manage/admin/connector/indexing-status");
-              }
-            }
-          );
-        }}
-      >
-        Delete Connector
-      </Button>
+          <Divider />
+        </>
+      )}
+
+      {googleDriveConnectorIndexingStatuses.length > 0 && (
+        <h2 className="font-bold mt-3 text-sm">Add New Connector:</h2>
+      )}
+      <Card className="mt-4">
+        <ConnectorForm<GoogleDriveConfig>
+          nameBuilder={googleDriveConnectorNameBuilder}
+          source="google_drive"
+          inputType="poll"
+          formBodyBuilder={(values) => (
+            <>
+              {TextArrayFieldBuilder({
+                name: "folder_paths",
+                label: "Folder Paths",
+                subtext:
+                  "Specify 0 or more folder paths to index! For example, specifying the path " +
+                  "'Engineering/Materials' will cause us to only index all files contained " +
+                  "within the 'Materials' folder within the 'Engineering' folder. " +
+                  "If no folder paths are specified, we will index all documents in your drive.",
+              })(values)}
+              <BooleanFormField
+                name="include_shared"
+                label="Include Shared Files + Shared Drives"
+                subtext={
+                  "If checked, then we will also index all documents + drives shared with you. " +
+                  "If this is combined with folder paths, then we will only index documents " +
+                  "that match both criteria."
+                }
+              />
+              <BooleanFormField
+                name="follow_shortcuts"
+                label="Follow Shortcuts"
+                subtext={
+                  "If checked, then will follow shortcuts to files and folder and " +
+                  "attempt to index those as well."
+                }
+              />
+            </>
+          )}
+          validationSchema={Yup.object().shape({
+            folder_paths: Yup.array()
+              .of(
+                Yup.string().required(
+                  "Please specify a folder path for your google drive e.g. 'Engineering/Materials'"
+                )
+              )
+              .required(),
+            include_shared: Yup.boolean().required(),
+            follow_shortcuts: Yup.boolean().required(),
+          })}
+          initialValues={{
+            folder_paths: [],
+            include_shared: false,
+            follow_shortcuts: false,
+          }}
+          refreshFreq={10 * 60} // 10 minutes
+          credentialId={liveCredential.id}
+        />
+      </Card>
     </div>
   );
-
-  // return (
-  //   <>
-  //     {googleDrivePublicCredential ? (
-  //       googleDriveConnectorIndexingStatus ? (
-  //         credentialIsLinked ? (
-  //           <div>
-  //             <div className="text-sm mb-2">
-  //               <div className="flex mb-1">
-  //                 The Google Drive connector is setup!{" "}
-  //                 <b className="mx-2">Status:</b>{" "}
-  //                 <StatusRow
-  //                   connectorIndexingStatus={googleDriveConnectorIndexingStatus}
-  //                   hasCredentialsIssue={
-  //                     googleDriveConnectorIndexingStatus.connector
-  //                       .credential_ids.length === 0
-  //                   }
-  //                   setPopup={setPopup}
-  //                   onUpdate={() => {
-  //                     mutate("/api/manage/admin/connector/indexing-status");
-  //                   }}
-  //                 />
-  //               </div>
-  //               <p>
-  //                 Checkout the{" "}
-  //                 <a href="/admin/indexing/status" className="text-blue-500">
-  //                   status page
-  //                 </a>{" "}
-  //                 for the latest indexing status. We fetch the latest documents
-  //                 from Google Drive every <b>10</b> minutes.
-  //               </p>
-  //             </div>
-  //             <Button
-  //               onClick={() => {
-  //                 deleteConnector(
-  //                   googleDriveConnectorIndexingStatus.connector.id
-  //                 ).then(() => {
-  //                   setPopup({
-  //                     message: "Successfully deleted connector!",
-  //                     type: "success",
-  //                   });
-  //                   mutate("/api/manage/admin/connector/indexing-status");
-  //                 });
-  //               }}
-  //             >
-  //               Delete Connector
-  //             </Button>
-  //           </div>
-  //         ) : (
-  //           <>
-  //             <p className="text-sm mb-2">
-  //               Click the button below to link your credentials! Once this is
-  //               done, all public documents in your Google Drive will be
-  //               searchable. We will refresh the latest documents every <b>10</b>{" "}
-  //               minutes.
-  //             </p>
-  //             <Button
-  //               onClick={async () => {
-  //                 await linkCredential(
-  //                   googleDriveConnectorIndexingStatus.connector.id,
-  //                   googleDrivePublicCredential.id
-  //                 );
-  //                 setPopup({
-  //                   message: "Successfully linked credentials!",
-  //                   type: "success",
-  //                 });
-  //                 mutate("/api/manage/admin/connector/indexing-status");
-  //               }}
-  //             >
-  //               Link Credentials
-  //             </Button>
-  //           </>
-  //         )
-  //       ) : (
-  //         <>
-  //           <p className="text-sm mb-2">
-  //             Click the button below to create a connector. We will refresh the
-  //             latest documents from Google Drive every <b>10</b> minutes.
-  //           </p>
-  //           <Button
-  //             onClick={async () => {
-  //               // if (connector.)
-
-  //               const connectorBase: ConnectorBase<{}> = {
-  //                 name: "GoogleDriveConnector",
-  //                 input_type: "load_state",
-  //                 source: "google_drive",
-  //                 connector_specific_config: {},
-  //                 refresh_freq: 60 * 10, // 10 minutes
-  //                 disabled: false,
-  //               };
-  //               const connectorCreationResponse = await fetch(
-  //                 `/api/manage/admin/connector`,
-  //                 {
-  //                   method: "POST",
-  //                   headers: {
-  //                     "Content-Type": "application/json",
-  //                   },
-  //                   body: JSON.stringify(connectorBase),
-  //                 }
-  //               );
-  //               if (!connectorCreationResponse.ok) {
-  //                 setPopup({
-  //                   message: `Failed to create connector - ${connectorCreationResponse.status}`,
-  //                   type: "error",
-  //                 });
-  //                 return;
-  //               }
-  //               const connector =
-  //                 (await connectorCreationResponse.json()) as Connector<{}>;
-
-  //               const credentialLinkResponse = await fetch(
-  //                 `/api/manage/connector/${connector.id}/credential/${googleDrivePublicCredential.id}`,
-  //                 {
-  //                   method: "PUT",
-  //                   headers: {
-  //                     "Content-Type": "application/json",
-  //                   },
-  //                 }
-  //               );
-  //               if (!credentialLinkResponse.ok) {
-  //                 setPopup({
-  //                   message: `Failed to link connector to credential - ${credentialLinkResponse.status}`,
-  //                   type: "error",
-  //                 });
-  //                 return;
-  //               }
-
-  //               setPopup({
-  //                 message: "Successfully created connector!",
-  //                 type: "success",
-  //               });
-  //               mutate("/api/manage/admin/connector/indexing-status");
-  //             }}
-  //           >
-  //             Add
-  //           </Button>
-  //         </>
-  //       )
-  //     ) : (
-  //       <p className="text-sm">
-  //         Please authenticate with Google Drive as described in Step 2! Once
-  //         done with that, you can then move on to enable this connector.
-  //       </p>
-  //     )}
-  //   </>
-  // );
 };
 
 const Main = () => {
-  const router = useRouter();
-  const { mutate } = useSWRConfig();
-
   const {
     data: appCredentialData,
     isLoading: isAppCredentialLoading,
@@ -441,10 +257,18 @@ const Main = () => {
     fetcher
   );
   const {
+    data: serviceAccountKeyData,
+    isLoading: isServiceAccountKeyLoading,
+    error: isServiceAccountKeyError,
+  } = useSWR<{ service_account_email: string }>(
+    "/api/manage/admin/connector/google-drive/service-account-key",
+    fetcher
+  );
+  const {
     data: connectorIndexingStatuses,
     isLoading: isConnectorIndexingStatusesLoading,
     error: isConnectorIndexingStatusesError,
-  } = useSWR<ConnectorIndexingStatus<any>[]>(
+  } = useSWR<ConnectorIndexingStatus<any, any>[]>(
     "/api/manage/admin/connector/indexing-status",
     fetcher
   );
@@ -452,24 +276,14 @@ const Main = () => {
     data: credentialsData,
     isLoading: isCredentialsLoading,
     error: isCredentialsError,
-  } = useSWR<Credential<GoogleDriveCredentialJson>[]>(
-    "/api/manage/credential",
-    fetcher
-  );
+    refreshCredentials,
+  } = usePublicCredentials();
 
-  const [popup, setPopup] = useState<{
-    message: string;
-    type: "success" | "error";
-  } | null>(null);
-  const setPopupWithExpiration = (popupSpec: PopupSpec | null) => {
-    setPopup(popupSpec);
-    setTimeout(() => {
-      setPopup(null);
-    }, 4000);
-  };
+  const { popup, setPopup } = usePopup();
 
   if (
     (!appCredentialData && isAppCredentialLoading) ||
+    (!serviceAccountKeyData && isServiceAccountKeyLoading) ||
     (!connectorIndexingStatuses && isConnectorIndexingStatusesLoading) ||
     (!credentialsData && isCredentialsLoading)
   ) {
@@ -496,7 +310,7 @@ const Main = () => {
     );
   }
 
-  if (isAppCredentialError) {
+  if (isAppCredentialError || isServiceAccountKeyError) {
     return (
       <div className="mx-auto">
         <div className="text-red-500">
@@ -506,143 +320,79 @@ const Main = () => {
     );
   }
 
-  const googleDrivePublicCredential = credentialsData.find(
+  const googleDrivePublicCredential:
+    | Credential<GoogleDriveCredentialJson>
+    | undefined = credentialsData.find(
     (credential) =>
-      credential.credential_json?.google_drive_tokens && credential.public_doc
+      credential.credential_json?.google_drive_tokens && credential.admin_public
   );
-  const googleDriveConnectorIndexingStatuses: ConnectorIndexingStatus<{}>[] =
-    connectorIndexingStatuses.filter(
-      (connectorIndexingStatus) =>
-        connectorIndexingStatus.connector.source === "google_drive"
-    );
+  const googleDriveServiceAccountCredential:
+    | Credential<GoogleDriveServiceAccountCredentialJson>
+    | undefined = credentialsData.find(
+    (credential) => credential.credential_json?.google_drive_service_account_key
+  );
+  const googleDriveConnectorIndexingStatuses: ConnectorIndexingStatus<
+    GoogleDriveConfig,
+    GoogleDriveCredentialJson
+  >[] = connectorIndexingStatuses.filter(
+    (connectorIndexingStatus) =>
+      connectorIndexingStatus.connector.source === "google_drive"
+  );
   const googleDriveConnectorIndexingStatus =
     googleDriveConnectorIndexingStatuses[0];
 
   const credentialIsLinked =
-    googleDriveConnectorIndexingStatus !== undefined &&
-    googleDrivePublicCredential !== undefined &&
-    googleDriveConnectorIndexingStatus.connector.credential_ids.includes(
-      googleDrivePublicCredential.id
-    );
+    (googleDriveConnectorIndexingStatus !== undefined &&
+      googleDrivePublicCredential !== undefined &&
+      googleDriveConnectorIndexingStatus.connector.credential_ids.includes(
+        googleDrivePublicCredential.id
+      )) ||
+    (googleDriveConnectorIndexingStatus !== undefined &&
+      googleDriveServiceAccountCredential !== undefined &&
+      googleDriveConnectorIndexingStatus.connector.credential_ids.includes(
+        googleDriveServiceAccountCredential.id
+      ));
 
   return (
     <>
-      {popup && <Popup message={popup.message} type={popup.type} />}
-      <h2 className="font-bold mb-2 mt-6 ml-auto mr-auto">
-        Step 1: Provide your app Credentials
-      </h2>
-      <div className="mt-2">
-        {appCredentialData?.client_id ? (
-          <div className="text-sm">
-            <div>
-              Found existing app credentials with the following{" "}
-              <b>Client ID:</b>
-              <p className="italic mt-1">{appCredentialData.client_id}</p>
-            </div>
-            <div className="mt-4">
-              If you want to update these credentials, upload a new
-              credentials.json file below.
-              <div className="mt-2">
-                <AppCredentialUpload
-                  setPopup={(popup) => {
-                    mutate(
-                      "/api/manage/admin/connector/google-drive/app-credential"
-                    );
-                    setPopupWithExpiration(popup);
-                  }}
-                />
-              </div>
-            </div>
-          </div>
-        ) : (
-          <>
-            <p className="text-sm">
-              Follow the guide{" "}
-              <a
-                className="text-blue-500"
-                target="_blank"
-                href="https://docs.danswer.dev/connectors/google_drive#authorization"
-              >
-                here
-              </a>{" "}
-              to setup your google app in your company workspace. Download the
-              credentials.json, and upload it here.
-            </p>
-            <AppCredentialUpload
-              setPopup={(popup) => {
-                mutate(
-                  "/api/manage/admin/connector/google-drive/app-credential"
-                );
-                setPopupWithExpiration(popup);
-              }}
-            />
-          </>
-        )}
-      </div>
+      {popup}
+      <Title className="mb-2 mt-6 ml-auto mr-auto">
+        Step 1: Provide your Credentials
+      </Title>
+      <DriveJsonUploadSection
+        setPopup={setPopup}
+        appCredentialData={appCredentialData}
+        serviceAccountCredentialData={serviceAccountKeyData}
+      />
 
-      <h2 className="font-bold mb-2 mt-6 ml-auto mr-auto">
+      <Title className="mb-2 mt-6 ml-auto mr-auto">
         Step 2: Authenticate with Danswer
-      </h2>
-      <div className="text-sm mb-4">
-        {googleDrivePublicCredential ? (
-          <>
-            <p className="mb-2">
-              <i>Existing credential already setup!</i>
-            </p>
-            <Button
-              onClick={async () => {
-                await deleteCredential(googleDrivePublicCredential.id);
-                setPopup({
-                  message: "Successfully revoked access to Google Drive!",
-                  type: "success",
-                });
-                mutate("/api/manage/credential");
-              }}
-            >
-              Revoke Access
-            </Button>
-          </>
-        ) : (
-          <>
-            <p className="mb-2">
-              Next, you must provide credentials via OAuth. This gives us read
-              access to the docs you have access to in your google drive
-              account.
-            </p>
-            <Button
-              onClick={async () => {
-                const [authUrl, errorMsg] = await setupGoogleDriveOAuth({
-                  isPublic: true,
-                });
-                if (authUrl) {
-                  // cookie used by callback to determine where to finally redirect to
-                  Cookies.set(GOOGLE_DRIVE_AUTH_IS_ADMIN_COOKIE_NAME, "true", {
-                    path: "/",
-                  });
-                  router.push(authUrl);
-                  return;
-                }
+      </Title>
+      <DriveOAuthSection
+        setPopup={setPopup}
+        refreshCredentials={refreshCredentials}
+        googleDrivePublicCredential={googleDrivePublicCredential}
+        googleDriveServiceAccountCredential={
+          googleDriveServiceAccountCredential
+        }
+        appCredentialData={appCredentialData}
+        serviceAccountKeyData={serviceAccountKeyData}
+      />
 
-                setPopup({
-                  message: errorMsg,
-                  type: "error",
-                });
-              }}
-            >
-              Authenticate with Google Drive
-            </Button>
-          </>
-        )}
-      </div>
-
-      <h2 className="font-bold mb-2 mt-6 ml-auto mr-auto">
+      <Title className="mb-2 mt-6 ml-auto mr-auto">
         Step 3: Start Indexing!
-      </h2>
+      </Title>
       <GoogleDriveConnectorManagement
         googleDrivePublicCredential={googleDrivePublicCredential}
+        googleDriveServiceAccountCredential={
+          googleDriveServiceAccountCredential
+        }
         googleDriveConnectorIndexingStatus={googleDriveConnectorIndexingStatus}
+        googleDriveConnectorIndexingStatuses={
+          googleDriveConnectorIndexingStatuses
+        }
         credentialIsLinked={credentialIsLinked}
-        setPopup={setPopupWithExpiration}
+        setPopup={setPopup}
       />
     </>
   );
@@ -654,10 +404,11 @@ export default function Page() {
       <div className="mb-4">
         <HealthCheckBanner />
       </div>
-      <div className="border-solid border-gray-600 border-b mb-4 pb-2 flex">
-        <GoogleDriveIcon size="32" />
-        <h1 className="text-3xl font-bold pl-2">Google Drive</h1>
-      </div>
+
+      <AdminPageTitle
+        icon={<GoogleDriveIcon size={32} />}
+        title="Google Drive"
+      />
 
       <Main />
     </div>
